@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-digital_goods_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bot_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bot} -d ${POSTGRES_DB:-digital_goods_bot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - bot_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - bot_net
+    command: ["sh", "-c", "alembic upgrade head && python -m app.main"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  tests:
+    profiles: ["test"]
+    build: .
+    env_file:
+      - .env
+    environment:
+      TEST_DATABASE_URL: postgresql+asyncpg://bot:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-digital_goods_bot}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - bot_net
+    command: ["sh", "-c", "pip install -r requirements-dev.txt && alembic upgrade head && pytest -q"]
+
+networks:
+  bot_net:
+    name: digital_goods_bot_net
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: digital_goods_bot_postgres_data
+  redis_data:
+    name: digital_goods_bot_redis_data

@@ -1,0 +1,27 @@
+# CHANGELOG
+
+## 2026-06-18
+
+### Изменения
+
+- Убрана переменная `TELEGRAM_PROXY_URL` из конфигурации и примера `.env`.
+- Бот снова подключается к Telegram API напрямую через стандартную aiogram-сессию.
+- Удалена инструкция по proxy из README.
+- Добавлена защита от попадания macOS AppleDouble-файлов `._*` и `.DS_Store` в Docker build context.
+- Обновлен `DEPLOY_REPORT.md` по фактическому успешному deploy на латвийский VPS.
+
+### Причина
+
+Переезд на новый VPS в Латвии, где ожидается прямой доступ к `https://api.telegram.org` без proxy. Также устранен риск падения Alembic из-за служебных macOS-файлов с нулевыми байтами и зафиксирован результат deploy.
+
+## 2026-06-17
+
+### Изменения
+
+- Добавлена переменная `TELEGRAM_PROXY_URL` для исходящих запросов Telegram API через HTTP/HTTPS proxy.
+- Бот теперь создает aiogram `AiohttpSession` с proxy из `.env`.
+- README и `.env.example` обновлены инструкцией по proxy.
+
+### Причина
+
+VPS не имеет прямого исходящего доступа к `https://api.telegram.org`, из-за чего polling падал с `TelegramNetworkError: Request timeout error`.
