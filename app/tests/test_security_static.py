@@ -98,6 +98,19 @@ class SecurityStaticTests(unittest.TestCase):
         self.assertIn("telegram_id in settings.admin_ids", users)
         self.assertIn("Admin.is_active.is_(True)", users)
 
+    def test_products_can_be_managed_with_admin_buttons(self) -> None:
+        admin = read("app/bot/handlers/admin.py")
+        keyboards = read("app/bot/keyboards.py")
+        service = read("app/services/admin.py")
+        self.assertIn("ProductCreateState", admin)
+        self.assertIn("ProductEditState", admin)
+        self.assertIn('AdminCb.filter(F.action == "pnew")', admin)
+        self.assertIn('AdminCb.filter(F.action == "pedit")', admin)
+        self.assertIn("admin_products_keyboard", keyboards)
+        self.assertIn("admin_product_keyboard", keyboards)
+        self.assertIn("update_product_description", service)
+        self.assertIn("update_product_currency", service)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -161,6 +161,29 @@ async def get_order_detail(session: AsyncSession, order_id: int) -> Order:
     return order
 
 
+def _normalize_currency(currency: str) -> str:
+    normalized = currency.strip().upper()
+    if len(normalized) != 3 or not normalized.isalpha():
+        raise ValidationError("currency must be an ISO-4217 code")
+    return normalized
+
+
+async def _ensure_product_tree(
+    session: AsyncSession,
+    *,
+    category_id: int,
+    subcategory_id: int,
+) -> None:
+    category = await session.get(Category, category_id)
+    if category is None:
+        raise NotFoundError("category not found")
+    subcategory = await session.get(Subcategory, subcategory_id)
+    if subcategory is None:
+        raise NotFoundError("subcategory not found")
+    if subcategory.category_id != category_id:
+        raise ValidationError("subcategory does not belong to category")
+
+
 async def create_category(
     session: AsyncSession,
     *,
@@ -230,8 +253,10 @@ async def create_product(
     admin_id: int | None = None,
     sort_order: int = 100,
 ) -> Product:
-    if price < 0:
+    if not price.is_finite() or price < 0:
         raise ValidationError("price must be non-negative")
+    await _ensure_product_tree(session, category_id=category_id, subcategory_id=subcategory_id)
+    normalized_currency = _normalize_currency(currency)
     product = Product(
         category_id=category_id,
         subcategory_id=subcategory_id,
@@ -240,7 +265,7 @@ async def create_product(
             description, field="description", max_length=MAX_DESCRIPTION_LENGTH, required=False
         ),
         price=price,
-        currency=currency.upper(),
+        currency=normalized_currency,
         sort_order=sort_order,
     )
     session.add(product)
@@ -257,8 +282,69 @@ async def create_product(
             "subcategory_id": subcategory_id,
             "title": product.title,
             "price": str(price),
-            "currency": product.currency,
+            "currency": normalized_currency,
         },
+    )
+    await session.commit()
+    return product
+
+
+async def update_product_description(
+    session: AsyncSession,
+    *,
+    product_id: int,
+    description: str,
+    actor_telegram_id: int,
+    admin_id: int | None = None,
+) -> Product:
+    product = await session.get(Product, product_id, with_for_update=True)
+    if product is None:
+        raise NotFoundError("product not found")
+    new_description = validate_text(
+        description,
+        field="description",
+        max_length=MAX_DESCRIPTION_LENGTH,
+        required=False,
+    )
+    old = {"description": product.description}
+    product.description = new_description
+    await write_audit_log(
+        session,
+        action="product.description_update",
+        entity_type="product",
+        entity_id=product.id,
+        admin_id=admin_id,
+        actor_telegram_id=actor_telegram_id,
+        old_values=old,
+        new_values={"description": new_description},
+    )
+    await session.commit()
+    return product
+
+
+async def update_product_currency(
+    session: AsyncSession,
+    *,
+    product_id: int,
+    currency: str,
+    actor_telegram_id: int,
+    admin_id: int | None = None,
+) -> Product:
+    normalized_currency = _normalize_currency(currency)
+    product = await session.get(Product, product_id, with_for_update=True)
+    if product is None:
+        raise NotFoundError("product not found")
+    old = {"currency": product.currency}
+    product.currency = normalized_currency
+    await write_audit_log(
+        session,
+        action="product.currency_update",
+        entity_type="product",
+        entity_id=product.id,
+        admin_id=admin_id,
+        actor_telegram_id=actor_telegram_id,
+        old_values=old,
+        new_values={"currency": normalized_currency},
     )
     await session.commit()
     return product
@@ -307,7 +393,7 @@ async def update_product_price(
     actor_telegram_id: int,
     admin_id: int | None = None,
 ) -> Product:
-    if price < 0:
+    if not price.is_finite() or price < 0:
         raise ValidationError("price must be non-negative")
     product = await session.get(Product, product_id, with_for_update=True)
     if product is None:

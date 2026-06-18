@@ -1,15 +1,29 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.callbacks import AdminCb
-from app.bot.keyboards import admin_back, admin_menu, admin_order_keyboard, admin_orders_keyboard
+from app.bot.keyboards import (
+    admin_back,
+    admin_category_select_keyboard,
+    admin_menu,
+    admin_order_keyboard,
+    admin_orders_keyboard,
+    admin_product_cancel_keyboard,
+    admin_product_confirm_keyboard,
+    admin_product_keyboard,
+    admin_product_skip_keyboard,
+    admin_products_keyboard,
+    admin_subcategory_select_keyboard,
+)
 from app.bot.utils import answer_or_edit
 from app.core.config import Settings
 from app.core.exceptions import AccessDenied, AppError, ValidationError
@@ -28,9 +42,18 @@ from app.services.admin import (
     update_entity_title,
     update_order_comment,
     update_order_status,
+    update_product_currency,
+    update_product_description,
     update_product_price,
 )
 from app.services.broadcasts import create_broadcast, run_broadcast
+from app.services.catalog import (
+    available_items_count,
+    get_product_with_tree,
+    list_categories,
+    list_subcategories,
+    paginate,
+)
 from app.services.digital_items import (
     delete_digital_item,
     export_digital_items_csv,
@@ -44,11 +67,85 @@ from app.services.users import require_admin, set_user_block
 router = Router()
 
 
+class ProductCreateState(StatesGroup):
+    title = State()
+    description = State()
+    price = State()
+    currency = State()
+    sort_order = State()
+    confirm = State()
+
+
+class ProductEditState(StatesGroup):
+    value = State()
+
+
 async def _admin(session: AsyncSession, settings: Settings, message_or_callback: Message | CallbackQuery):
     user = message_or_callback.from_user
     if user is None:
         raise AccessDenied("admin access required")
     return await require_admin(session, settings, user.id)
+
+
+def _parse_price(raw: str) -> Decimal:
+    try:
+        price = Decimal(raw.replace(",", ".").strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise ValidationError("Цена должна быть числом, например 199.00") from exc
+    if price < 0:
+        raise ValidationError("Цена не может быть отрицательной.")
+    return price
+
+
+def _parse_sort_order(raw: str) -> int:
+    try:
+        return int(raw.strip())
+    except ValueError as exc:
+        raise ValidationError("Сортировка должна быть целым числом.") from exc
+
+
+async def _products_page(session: AsyncSession, *, page: int):
+    stmt = select(Product).order_by(Product.sort_order.asc(), Product.id.asc())
+    return await paginate(session, stmt, page=page)
+
+
+async def _product_card_text(session: AsyncSession, product: Product) -> str:
+    available = await available_items_count(session, product.id)
+    category_title = product.category.title if product.category else f"#{product.category_id}"
+    subcategory_title = (
+        product.subcategory.title if product.subcategory else f"#{product.subcategory_id}"
+    )
+    description = product.description or "-"
+    return "\n".join(
+        [
+            f"Товар #{product.id}",
+            f"Название: {product.title}",
+            f"Категория: {category_title}",
+            f"Подкатегория: {subcategory_title}",
+            f"Цена: {product.price} {product.currency}",
+            f"Доступных кодов: {available}",
+            f"Статус: {'активен' if product.is_active else 'отключен'}",
+            f"Сортировка: {product.sort_order}",
+            "",
+            "Описание:",
+            description,
+        ]
+    )
+
+
+async def _show_product_card(
+    target: Message | CallbackQuery,
+    session: AsyncSession,
+    *,
+    product_id: int,
+    page: int = 0,
+) -> None:
+    product = await get_product_with_tree(session, product_id)
+    await answer_or_edit(
+        target,
+        await _product_card_text(session, product),
+        reply_markup=admin_product_keyboard(product, page=page),
+    )
 
 
 @router.message(Command("admin"))
@@ -153,16 +250,11 @@ async def admin_lists(
             reply_markup=admin_back(),
         )
     elif entity == "products":
-        products = list(await session.scalars(select(Product).order_by(Product.sort_order, Product.id)))
+        page = await _products_page(session, page=callback_data.page)
         await answer_or_edit(
             callback,
-            "Товары\n\n"
-            + "\n".join(
-                f"{p.id}: cat={p.category_id} sub={p.subcategory_id} {p.title} "
-                f"{p.price} {p.currency} active={p.is_active}"
-                for p in products
-            ),
-            reply_markup=admin_back(),
+            "Товары\n\nВыберите товар для редактирования или создайте новый.",
+            reply_markup=admin_products_keyboard(page),
         )
     elif entity == "items":
         rows = await session.execute(
@@ -179,6 +271,488 @@ async def admin_lists(
     else:
         await answer_or_edit(callback, "Раздел пока пуст.", reply_markup=admin_back())
     await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "pview"))
+async def admin_product_view(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await _show_product_card(
+            callback,
+            session,
+            product_id=callback_data.object_id,
+            page=callback_data.page,
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "pnew"))
+async def admin_product_create_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await state.clear()
+        page = await list_categories(session, page=callback_data.page, active_only=True)
+        if page.total == 0:
+            await answer_or_edit(
+                callback,
+                "Сначала создайте и включите хотя бы одну категорию.",
+                reply_markup=admin_back(),
+            )
+            await callback.answer()
+            return
+        await answer_or_edit(
+            callback,
+            "Создание товара\n\nВыберите категорию.",
+            reply_markup=admin_category_select_keyboard(page, action="pcat", back_action="cancel"),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "pcat"))
+async def admin_product_create_category(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        if callback_data.entity == "catp":
+            page = await list_categories(session, page=callback_data.page, active_only=True)
+            await answer_or_edit(
+                callback,
+                "Создание товара\n\nВыберите категорию.",
+                reply_markup=admin_category_select_keyboard(page, action="pcat", back_action="cancel"),
+            )
+        else:
+            category_id = callback_data.object_id
+            await state.update_data(category_id=category_id)
+            page = await list_subcategories(
+                session,
+                category_id=category_id,
+                page=0,
+                active_only=True,
+            )
+            if page.total == 0:
+                await answer_or_edit(
+                    callback,
+                    "В выбранной категории нет активных подкатегорий. Сначала создайте и включите подкатегорию.",
+                    reply_markup=admin_category_select_keyboard(
+                        await list_categories(session, page=0, active_only=True),
+                        action="pcat",
+                        back_action="cancel",
+                    ),
+                )
+                await callback.answer()
+                return
+            await answer_or_edit(
+                callback,
+                "Создание товара\n\nВыберите подкатегорию.",
+                reply_markup=admin_subcategory_select_keyboard(category_id, page, action="psub"),
+            )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "psub"))
+async def admin_product_create_subcategory(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        if callback_data.entity.startswith("sub") and callback_data.entity != "sub":
+            category_id = int(callback_data.entity.removeprefix("sub"))
+            page = await list_subcategories(
+                session,
+                category_id=category_id,
+                page=callback_data.page,
+                active_only=True,
+            )
+            await answer_or_edit(
+                callback,
+                "Создание товара\n\nВыберите подкатегорию.",
+                reply_markup=admin_subcategory_select_keyboard(category_id, page, action="psub"),
+            )
+        else:
+            await state.update_data(subcategory_id=callback_data.object_id)
+            await state.set_state(ProductCreateState.title)
+            await answer_or_edit(
+                callback,
+                "Введите название товара.",
+                reply_markup=admin_product_cancel_keyboard(),
+            )
+    except (ValueError, AppError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "pcancel"))
+async def admin_product_flow_cancel(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+    except AccessDenied:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await answer_or_edit(callback, "Действие отменено.", reply_markup=admin_menu())
+    await callback.answer()
+
+
+@router.message(StateFilter(ProductCreateState.title))
+async def admin_product_create_title(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, message)
+        title = (message.text or "").strip()
+        if not title:
+            raise ValidationError("Название не может быть пустым.")
+        await state.update_data(title=title)
+        await state.set_state(ProductCreateState.description)
+        await message.answer(
+            "Введите описание товара или нажмите «Пропустить».",
+            reply_markup=admin_product_skip_keyboard("desc"),
+        )
+    except AppError as exc:
+        await message.answer(str(exc))
+
+
+@router.message(StateFilter(ProductCreateState.description))
+async def admin_product_create_description(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, message)
+        description = (message.text or "").strip()
+        await state.update_data(description="" if description == "-" else description)
+        await state.set_state(ProductCreateState.price)
+        await message.answer("Введите цену, например 199.00.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await message.answer(str(exc))
+
+
+@router.message(StateFilter(ProductCreateState.price))
+async def admin_product_create_price(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, message)
+        price = _parse_price(message.text or "")
+        await state.update_data(price=str(price))
+        await state.set_state(ProductCreateState.currency)
+        await message.answer("Введите валюту ISO-4217, например RUB.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await message.answer(str(exc))
+
+
+@router.message(StateFilter(ProductCreateState.currency))
+async def admin_product_create_currency(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, message)
+        currency = (message.text or "").strip().upper()
+        if len(currency) != 3 or not currency.isalpha():
+            raise ValidationError("Валюта должна быть ISO-кодом из 3 букв, например RUB.")
+        await state.update_data(currency=currency)
+        await state.set_state(ProductCreateState.sort_order)
+        await message.answer(
+            "Введите порядок сортировки или нажмите «Пропустить».",
+            reply_markup=admin_product_skip_keyboard("sort"),
+        )
+    except AppError as exc:
+        await message.answer(str(exc))
+
+
+@router.message(StateFilter(ProductCreateState.sort_order))
+async def admin_product_create_sort_order(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, message)
+        sort_order = _parse_sort_order(message.text or "")
+        await state.update_data(sort_order=sort_order)
+        await _show_product_create_confirm(message, state)
+    except AppError as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "pskip"))
+async def admin_product_create_skip(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        if callback_data.entity == "desc":
+            await state.update_data(description="")
+            await state.set_state(ProductCreateState.price)
+            await answer_or_edit(
+                callback,
+                "Введите цену, например 199.00.",
+                reply_markup=admin_product_cancel_keyboard(),
+            )
+        elif callback_data.entity == "sort":
+            await state.update_data(sort_order=100)
+            await _show_product_create_confirm(callback, state)
+        else:
+            raise ValidationError("Нельзя пропустить этот шаг.")
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+async def _show_product_create_confirm(target: Message | CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(ProductCreateState.confirm)
+    data = await state.get_data()
+    text = "\n".join(
+        [
+            "Проверьте товар перед созданием:",
+            f"Категория ID: {data.get('category_id')}",
+            f"Подкатегория ID: {data.get('subcategory_id')}",
+            f"Название: {data.get('title')}",
+            f"Цена: {data.get('price')} {data.get('currency')}",
+            f"Сортировка: {data.get('sort_order', 100)}",
+            "",
+            "Описание:",
+            data.get("description") or "-",
+        ]
+    )
+    await answer_or_edit(target, text, reply_markup=admin_product_confirm_keyboard())
+
+
+@router.callback_query(AdminCb.filter(F.action == "pconfirm"))
+async def admin_product_create_confirm(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        data = await state.get_data()
+        product = await create_product(
+            session,
+            category_id=int(data["category_id"]),
+            subcategory_id=int(data["subcategory_id"]),
+            title=str(data["title"]),
+            description=str(data.get("description") or ""),
+            price=Decimal(str(data["price"])),
+            currency=str(data["currency"]),
+            sort_order=int(data.get("sort_order") or 100),
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await state.clear()
+        await _show_product_card(callback, session, product_id=product.id)
+    except (KeyError, ValueError, InvalidOperation, AppError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("Товар создан.")
+
+
+@router.callback_query(AdminCb.filter(F.action == "pedit"))
+async def admin_product_edit_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    field_labels = {
+        "title": "новое название",
+        "desc": "новое описание или '-' чтобы очистить",
+        "price": "новую цену, например 199.00",
+        "curr": "новую валюту, например RUB",
+        "sort": "новый порядок сортировки",
+    }
+    try:
+        await _admin(session, settings, callback)
+        if callback_data.entity not in field_labels:
+            raise ValidationError("Поле не поддерживается.")
+        await state.set_state(ProductEditState.value)
+        await state.update_data(
+            product_id=callback_data.object_id,
+            field=callback_data.entity,
+            page=callback_data.page,
+        )
+        await answer_or_edit(
+            callback,
+            f"Введите {field_labels[callback_data.entity]}.",
+            reply_markup=admin_product_cancel_keyboard(),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(ProductEditState.value))
+async def admin_product_edit_value(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        product_id = int(data["product_id"])
+        field = str(data["field"])
+        raw_value = (message.text or "").strip()
+        if field == "title":
+            await update_entity_title(
+                session,
+                entity="product",
+                entity_id=product_id,
+                title=raw_value,
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        elif field == "desc":
+            await update_product_description(
+                session,
+                product_id=product_id,
+                description="" if raw_value == "-" else raw_value,
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        elif field == "price":
+            await update_product_price(
+                session,
+                product_id=product_id,
+                price=_parse_price(raw_value),
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        elif field == "curr":
+            await update_product_currency(
+                session,
+                product_id=product_id,
+                currency=raw_value,
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        elif field == "sort":
+            await update_entity_sort_order(
+                session,
+                entity="product",
+                entity_id=product_id,
+                sort_order=_parse_sort_order(raw_value),
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        else:
+            raise ValidationError("Поле не поддерживается.")
+        page = int(data.get("page") or 0)
+        await state.clear()
+        await _show_product_card(message, session, product_id=product_id, page=page)
+    except (KeyError, ValueError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "ptog"))
+async def admin_product_toggle_active(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        product = await session.get(Product, callback_data.object_id)
+        if product is None:
+            raise ValidationError("Товар не найден.")
+        await set_entity_active(
+            session,
+            entity="product",
+            entity_id=product.id,
+            is_active=not product.is_active,
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await _show_product_card(callback, session, product_id=product.id, page=callback_data.page)
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("Статус изменен.")
+
+
+@router.callback_query(AdminCb.filter(F.action == "pdel"))
+async def admin_product_delete(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        await soft_delete_entity(
+            session,
+            entity="product",
+            entity_id=callback_data.object_id,
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        page = await _products_page(session, page=callback_data.page)
+        await answer_or_edit(
+            callback,
+            "Товар отключен и отмечен в audit log.\n\nВыберите следующий товар.",
+            reply_markup=admin_products_keyboard(page),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("Товар отключен.")
 
 
 @router.callback_query(AdminCb.filter((F.action == "view") & (F.entity == "order")))

@@ -156,3 +156,130 @@ def admin_order_keyboard(order_id: int, has_item: bool) -> InlineKeyboardMarkup:
     builder.button(text="Админ-меню", callback_data=AdminCb(action="home"))
     builder.adjust(1)
     return builder.as_markup()
+
+
+def admin_products_keyboard(page: Page) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Добавить товар", callback_data=AdminCb(action="pnew", entity="product"))
+    for product in page.items:
+        assert isinstance(product, Product)
+        state = "вкл" if product.is_active else "выкл"
+        builder.button(
+            text=f"#{product.id} · {product.title} · {product.price} {product.currency} · {state}",
+            callback_data=AdminCb(action="pview", entity="product", object_id=product.id, page=page.page),
+        )
+    _pager(
+        builder,
+        cb_prev=AdminCb(action="list", entity="products", page=page.page - 1),
+        cb_next=AdminCb(action="list", entity="products", page=page.page + 1),
+        page=page,
+    )
+    builder.button(text="Админ-меню", callback_data=AdminCb(action="home"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_product_keyboard(product: Product, *, page: int = 0) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="Название",
+        callback_data=AdminCb(action="pedit", entity="title", object_id=product.id, page=page),
+    )
+    builder.button(
+        text="Описание",
+        callback_data=AdminCb(action="pedit", entity="desc", object_id=product.id, page=page),
+    )
+    builder.button(
+        text="Цена",
+        callback_data=AdminCb(action="pedit", entity="price", object_id=product.id, page=page),
+    )
+    builder.button(
+        text="Валюта",
+        callback_data=AdminCb(action="pedit", entity="curr", object_id=product.id, page=page),
+    )
+    builder.button(
+        text="Сортировка",
+        callback_data=AdminCb(action="pedit", entity="sort", object_id=product.id, page=page),
+    )
+    builder.button(
+        text="Отключить" if product.is_active else "Включить",
+        callback_data=AdminCb(action="ptog", entity="product", object_id=product.id, page=page),
+    )
+    builder.button(
+        text="Удалить",
+        callback_data=AdminCb(action="pdel", entity="product", object_id=product.id, page=page),
+    )
+    builder.button(text="К списку товаров", callback_data=AdminCb(action="list", entity="products", page=page))
+    builder.button(text="Админ-меню", callback_data=AdminCb(action="home"))
+    builder.adjust(2, 2, 1, 2, 1, 1)
+    return builder.as_markup()
+
+
+def admin_category_select_keyboard(page: Page, *, action: str, back_action: str = "list") -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for category in page.items:
+        assert isinstance(category, Category)
+        builder.button(
+            text=category.title,
+            callback_data=AdminCb(action=action, entity="cat", object_id=category.id, page=page.page),
+        )
+    _pager(
+        builder,
+        cb_prev=AdminCb(action=action, entity="catp", page=page.page - 1),
+        cb_next=AdminCb(action=action, entity="catp", page=page.page + 1),
+        page=page,
+    )
+    if back_action == "cancel":
+        builder.button(text="Отмена", callback_data=AdminCb(action="pcancel", entity="product"))
+    else:
+        builder.button(text="К списку товаров", callback_data=AdminCb(action="list", entity="products"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_subcategory_select_keyboard(
+    category_id: int,
+    page: Page,
+    *,
+    action: str,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for subcategory in page.items:
+        assert isinstance(subcategory, Subcategory)
+        builder.button(
+            text=subcategory.title,
+            callback_data=AdminCb(action=action, entity="sub", object_id=subcategory.id, page=page.page),
+        )
+    _pager(
+        builder,
+        cb_prev=AdminCb(action=action, entity=f"sub{category_id}", page=page.page - 1),
+        cb_next=AdminCb(action=action, entity=f"sub{category_id}", page=page.page + 1),
+        page=page,
+    )
+    builder.button(text="К категориям", callback_data=AdminCb(action="pnew", entity="product"))
+    builder.button(text="Отмена", callback_data=AdminCb(action="pcancel", entity="product"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_product_skip_keyboard(field: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Пропустить", callback_data=AdminCb(action="pskip", entity=field))
+    builder.button(text="Отмена", callback_data=AdminCb(action="pcancel", entity="product"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_product_cancel_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Отмена", callback_data=AdminCb(action="pcancel", entity="product"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_product_confirm_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Создать товар", callback_data=AdminCb(action="pconfirm", entity="product"))
+    builder.button(text="Отмена", callback_data=AdminCb(action="pcancel", entity="product"))
+    builder.adjust(1)
+    return builder.as_markup()
