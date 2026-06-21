@@ -9,12 +9,21 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.bot.callbacks import AdminCb
 from app.bot.keyboards import (
     admin_back,
+    admin_categories_keyboard,
+    admin_category_keyboard,
     admin_category_select_keyboard,
+    admin_digital_item_keyboard,
+    admin_digital_product_keyboard,
+    admin_digital_search_keyboard,
+    admin_empty_product_tree_keyboard,
     admin_menu,
+    admin_menu_button_keyboard,
+    admin_menu_buttons_keyboard,
     admin_order_keyboard,
     admin_orders_keyboard,
     admin_product_cancel_keyboard,
@@ -22,6 +31,9 @@ from app.bot.keyboards import (
     admin_product_keyboard,
     admin_product_skip_keyboard,
     admin_products_keyboard,
+    admin_settings_keyboard,
+    admin_subcategories_keyboard,
+    admin_subcategory_keyboard,
     admin_subcategory_select_keyboard,
 )
 from app.bot.utils import answer_or_edit
@@ -53,6 +65,8 @@ from app.services.catalog import (
     list_categories,
     list_subcategories,
     paginate,
+    paginate_items,
+    product_nominal_sort_key,
 )
 from app.services.digital_items import (
     delete_digital_item,
@@ -61,7 +75,16 @@ from app.services.digital_items import (
     search_digital_items,
     update_digital_item_value,
 )
-from app.services.settings import set_setting_text
+from app.services.menu import (
+    DEFAULT_TEXTS,
+    create_text_menu_button,
+    delete_menu_button,
+    get_button_text,
+    get_menu_button,
+    get_menu_buttons,
+    update_menu_button,
+)
+from app.services.settings import get_setting_text, set_setting_text
 from app.services.users import require_admin, set_user_block
 
 router = Router()
@@ -78,6 +101,52 @@ class ProductCreateState(StatesGroup):
 
 class ProductEditState(StatesGroup):
     value = State()
+
+
+class CategoryCreateState(StatesGroup):
+    title = State()
+
+
+class CategoryEditState(StatesGroup):
+    value = State()
+
+
+class SubcategoryCreateState(StatesGroup):
+    title = State()
+
+
+class SubcategoryEditState(StatesGroup):
+    value = State()
+
+
+class DigitalItemUploadState(StatesGroup):
+    values = State()
+
+
+class DigitalItemSearchState(StatesGroup):
+    query = State()
+
+
+class DigitalItemEditState(StatesGroup):
+    value = State()
+
+
+class MenuButtonCreateState(StatesGroup):
+    label = State()
+    content = State()
+
+
+class MenuButtonEditState(StatesGroup):
+    value = State()
+
+
+class SettingTextEditState(StatesGroup):
+    value = State()
+
+
+class BroadcastState(StatesGroup):
+    target = State()
+    text = State()
 
 
 async def _admin(session: AsyncSession, settings: Settings, message_or_callback: Message | CallbackQuery):
@@ -105,8 +174,45 @@ def _parse_sort_order(raw: str) -> int:
 
 
 async def _products_page(session: AsyncSession, *, page: int):
-    stmt = select(Product).order_by(Product.sort_order.asc(), Product.id.asc())
+    stmt = select(Product).options(selectinload(Product.category), selectinload(Product.subcategory))
+    products = list(await session.scalars(stmt))
+    products.sort(key=product_nominal_sort_key)
+    return paginate_items(products, page=page)
+
+
+async def _categories_page(session: AsyncSession, *, page: int):
+    stmt = select(Category).order_by(Category.sort_order.asc(), Category.id.asc())
     return await paginate(session, stmt, page=page)
+
+
+async def _subcategories_page(session: AsyncSession, *, page: int, category_id: int = 0):
+    stmt = select(Subcategory).order_by(Subcategory.sort_order.asc(), Subcategory.id.asc())
+    if category_id:
+        stmt = stmt.where(Subcategory.category_id == category_id)
+    return await paginate(session, stmt, page=page)
+
+
+def _category_card_text(category: Category) -> str:
+    return "\n".join(
+        [
+            f"📁 Категория #{category.id}",
+            f"✏️ Название: {category.title}",
+            f"📌 Статус: {'активна' if category.is_active else 'отключена'}",
+            f"🔢 Сортировка: {category.sort_order}",
+        ]
+    )
+
+
+def _subcategory_card_text(subcategory: Subcategory) -> str:
+    return "\n".join(
+        [
+            f"🗂 Подкатегория #{subcategory.id}",
+            f"📁 Категория ID: {subcategory.category_id}",
+            f"✏️ Название: {subcategory.title}",
+            f"📌 Статус: {'активна' if subcategory.is_active else 'отключена'}",
+            f"🔢 Сортировка: {subcategory.sort_order}",
+        ]
+    )
 
 
 async def _product_card_text(session: AsyncSession, product: Product) -> str:
@@ -118,16 +224,16 @@ async def _product_card_text(session: AsyncSession, product: Product) -> str:
     description = product.description or "-"
     return "\n".join(
         [
-            f"Товар #{product.id}",
-            f"Название: {product.title}",
-            f"Категория: {category_title}",
-            f"Подкатегория: {subcategory_title}",
-            f"Цена: {product.price} {product.currency}",
-            f"Доступных кодов: {available}",
-            f"Статус: {'активен' if product.is_active else 'отключен'}",
-            f"Сортировка: {product.sort_order}",
+            f"📦 Товар #{product.id}",
+            f"✏️ Название: {product.title}",
+            f"📁 Категория: {category_title}",
+            f"🗂 Подкатегория: {subcategory_title}",
+            f"💰 Цена: {product.price} {product.currency}",
+            f"🔑 Доступных кодов: {available}",
+            f"📌 Статус: {'активен' if product.is_active else 'отключен'}",
+            f"🔢 Сортировка: {product.sort_order}",
             "",
-            "Описание:",
+            "📝 Описание:",
             description,
         ]
     )
@@ -148,14 +254,82 @@ async def _show_product_card(
     )
 
 
+async def _digital_product_text(session: AsyncSession, product: Product) -> str:
+    rows = await session.execute(
+        select(DigitalItem.status, func.count(DigitalItem.id))
+        .where(DigitalItem.product_id == product.id)
+        .group_by(DigitalItem.status)
+    )
+    counts = {status: count for status, count in rows}
+    return "\n".join(
+        [
+            f"🔑 Цифровые товары · {product.title}",
+            f"📦 product_id: {product.id}",
+            f"✅ Доступно: {counts.get('available', 0)}",
+            f"⏳ Зарезервировано: {counts.get('reserved', 0)}",
+            f"🏷 Продано: {counts.get('sold', 0)}",
+            f"🗑 Удалено: {counts.get('deleted', 0)}",
+            "",
+            "Можно загрузить коды списком: один код на строку. После оплаты бот выдаст покупателю нужное количество кодов автоматически.",
+        ]
+    )
+
+
+async def _show_digital_product(
+    target: Message | CallbackQuery,
+    session: AsyncSession,
+    *,
+    product_id: int,
+    page: int = 0,
+) -> None:
+    product = await get_product_with_tree(session, product_id)
+    await answer_or_edit(
+        target,
+        await _digital_product_text(session, product),
+        reply_markup=admin_digital_product_keyboard(product.id, page=page),
+    )
+
+
+async def _show_category_card(
+    target: Message | CallbackQuery,
+    session: AsyncSession,
+    *,
+    category_id: int,
+    page: int = 0,
+) -> None:
+    category = await session.get(Category, category_id)
+    if category is None:
+        raise ValidationError("Категория не найдена.")
+    await answer_or_edit(target, _category_card_text(category), reply_markup=admin_category_keyboard(category, page=page))
+
+
+async def _show_subcategory_card(
+    target: Message | CallbackQuery,
+    session: AsyncSession,
+    *,
+    subcategory_id: int,
+    page: int = 0,
+) -> None:
+    subcategory = await session.scalar(
+        select(Subcategory).where(Subcategory.id == subcategory_id)
+    )
+    if subcategory is None:
+        raise ValidationError("Подкатегория не найдена.")
+    await answer_or_edit(
+        target,
+        _subcategory_card_text(subcategory),
+        reply_markup=admin_subcategory_keyboard(subcategory, page=page),
+    )
+
+
 @router.message(Command("admin"))
 async def admin_command(message: Message, session: AsyncSession, settings: Settings) -> None:
     try:
         await _admin(session, settings, message)
     except AccessDenied:
-        await message.answer("Нет доступа.")
+        await message.answer("🚫 Нет доступа.")
         return
-    await message.answer("Админ-панель", reply_markup=admin_menu())
+    await message.answer("🛠 Админ-панель", reply_markup=admin_menu())
 
 
 @router.callback_query(AdminCb.filter(F.action == "home"))
@@ -163,9 +337,9 @@ async def admin_home(callback: CallbackQuery, session: AsyncSession, settings: S
     try:
         await _admin(session, settings, callback)
     except AccessDenied:
-        await callback.answer("Нет доступа.", show_alert=True)
+        await callback.answer("🚫 Нет доступа.", show_alert=True)
         return
-    await answer_or_edit(callback, "Админ-панель", reply_markup=admin_menu())
+    await answer_or_edit(callback, "🛠 Админ-панель", reply_markup=admin_menu())
     await callback.answer()
 
 
@@ -179,26 +353,26 @@ async def admin_stats(callback: CallbackQuery, session: AsyncSession, settings: 
         return
     text = "\n".join(
         [
-            "Статистика",
-            f"Общая выручка: {stats.total_revenue}",
-            f"Сегодня: {stats.today_revenue}",
-            f"7 дней: {stats.week_revenue}",
-            f"30 дней: {stats.month_revenue}",
-            f"Заказов всего: {stats.orders_total}",
-            f"Успешных: {stats.orders_success}",
-            f"Отмененных: {stats.orders_cancelled}",
-            f"Ошибочных: {stats.orders_error}",
-            f"Средний чек: {stats.average_check:.2f}",
-            f"Кодов доступно: {stats.available_items}",
-            f"Кодов продано: {stats.sold_items}",
+            "📊 Статистика",
+            f"💰 Общая выручка: {stats.total_revenue}",
+            f"📅 Сегодня: {stats.today_revenue}",
+            f"🗓 7 дней: {stats.week_revenue}",
+            f"📆 30 дней: {stats.month_revenue}",
+            f"🧾 Заказов всего: {stats.orders_total}",
+            f"✅ Успешных: {stats.orders_success}",
+            f"🚫 Отмененных: {stats.orders_cancelled}",
+            f"⚠️ Ошибочных: {stats.orders_error}",
+            f"📈 Средний чек: {stats.average_check:.2f}",
+            f"🔑 Кодов доступно: {stats.available_items}",
+            f"🏷 Кодов продано: {stats.sold_items}",
             "",
-            "Топ товаров:",
+            "🏆 Топ товаров:",
             *[f"{title}: {count} / {amount}" for title, count, amount in stats.top_products],
             "",
-            "Топ категорий:",
+            "🏆 Топ категорий:",
             *[f"{title}: {count} / {amount}" for title, count, amount in stats.top_categories],
             "",
-            "Топ покупателей:",
+            "🏆 Топ покупателей:",
             *[f"{telegram_id} @{username or '-'}: {amount}" for telegram_id, username, amount in stats.top_buyers],
         ]
     )
@@ -221,39 +395,43 @@ async def admin_lists(
     entity = callback_data.entity
     if entity == "orders":
         orders = await list_recent_orders(session, limit=10)
-        text = "Последние заказы\n\n" + "\n".join(
+        text = "🧾 Последние заказы\n\n" + "\n".join(
             f"#{o.id} · {o.status} · {o.amount} {o.currency} · @{o.user.username or o.user.telegram_id}"
             for o in orders
         )
-        await answer_or_edit(callback, text or "Заказов нет.", reply_markup=admin_orders_keyboard(o.id for o in orders))
+        await answer_or_edit(callback, text or "🧾 Заказов нет.", reply_markup=admin_orders_keyboard(o.id for o in orders))
     elif entity == "users":
         users = list(
             await session.scalars(select(User).order_by(User.last_activity_at.desc()).limit(15))
         )
-        text = "Пользователи\n\n" + "\n".join(
+        text = "👥 Пользователи\n\n" + "\n".join(
             f"{u.id}: {u.telegram_id} @{u.username or '-'} blocked={u.is_blocked}" for u in users
         )
         await answer_or_edit(callback, text, reply_markup=admin_back())
     elif entity == "cats":
-        cats = list(await session.scalars(select(Category).order_by(Category.sort_order, Category.id)))
+        page = await _categories_page(session, page=callback_data.page)
         await answer_or_edit(
             callback,
-            "Категории\n\n" + "\n".join(f"{c.id}: {c.title} active={c.is_active}" for c in cats),
-            reply_markup=admin_back(),
+            "📁 Категории\n\nВыберите категорию для редактирования или создайте новую.",
+            reply_markup=admin_categories_keyboard(page),
         )
     elif entity == "subs":
-        subs = list(await session.scalars(select(Subcategory).order_by(Subcategory.sort_order, Subcategory.id)))
+        category_id = callback_data.object_id
+        page = await _subcategories_page(session, page=callback_data.page, category_id=category_id)
+        title = "🗂 Подкатегории"
+        if category_id:
+            category = await session.get(Category, category_id)
+            title = f"🗂 Подкатегории · {category.title if category else f'#{category_id}'}"
         await answer_or_edit(
             callback,
-            "Подкатегории\n\n"
-            + "\n".join(f"{s.id}: cat={s.category_id} {s.title} active={s.is_active}" for s in subs),
-            reply_markup=admin_back(),
+            f"{title}\n\nВыберите подкатегорию для редактирования или создайте новую.",
+            reply_markup=admin_subcategories_keyboard(page, category_id=category_id),
         )
     elif entity == "products":
         page = await _products_page(session, page=callback_data.page)
         await answer_or_edit(
             callback,
-            "Товары\n\nВыберите товар для редактирования или создайте новый.",
+            "📦 Товары\n\nВыберите товар для редактирования или создайте новый.",
             reply_markup=admin_products_keyboard(page),
         )
     elif entity == "items":
@@ -264,13 +442,384 @@ async def admin_lists(
         )
         await answer_or_edit(
             callback,
-            "Остатки цифровых товаров\n\n"
-            + "\n".join(f"product={p} {status}: {count}" for p, status, count in rows),
+            "🔑 Остатки цифровых товаров\n\n"
+            + "\n".join(f"📦 product={p} · {status}: {count}" for p, status, count in rows),
             reply_markup=admin_back(),
         )
     else:
-        await answer_or_edit(callback, "Раздел пока пуст.", reply_markup=admin_back())
+        await answer_or_edit(callback, "📭 Раздел пока пуст.", reply_markup=admin_back())
     await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "settings"))
+async def admin_settings(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+    except AccessDenied:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await answer_or_edit(
+        callback,
+        "⚙️ Настройки\n\nВыберите текст или раздел для редактирования.",
+        reply_markup=admin_settings_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "stext"))
+async def admin_setting_text_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    allowed = {"welcome_text", *DEFAULT_TEXTS.keys()}
+    try:
+        await _admin(session, settings, callback)
+        if callback_data.entity not in allowed:
+            raise ValidationError("Этот текст нельзя редактировать.")
+        current = await get_setting_text(session, callback_data.entity, DEFAULT_TEXTS.get(callback_data.entity, ""))
+        await state.set_state(SettingTextEditState.value)
+        await state.update_data(key=callback_data.entity)
+        await answer_or_edit(
+            callback,
+            f"📝 Текущий текст:\n\n{current}\n\nОтправьте новый текст одним сообщением.",
+            reply_markup=admin_product_cancel_keyboard(),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(SettingTextEditState.value))
+async def admin_setting_text_value(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        await set_setting_text(
+            session,
+            key=str(data["key"]),
+            value=(message.text or "").strip(),
+            actor_telegram_id=message.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await state.clear()
+        await message.answer("✅ Текст обновлен.", reply_markup=admin_settings_keyboard())
+    except (KeyError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "menu"))
+async def admin_menu_buttons(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        buttons = await get_menu_buttons(session)
+    except AccessDenied:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await answer_or_edit(
+        callback,
+        "🧩 Кнопки главного меню\n\nВыберите кнопку для настройки.",
+        reply_markup=admin_menu_buttons_keyboard(buttons),
+    )
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "mbview"))
+async def admin_menu_button_view(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        button = await get_menu_button(session, callback_data.entity)
+        content = await get_button_text(session, button) if button.kind == "text" else "-"
+        text = "\n".join(
+            [
+                f"🧩 Кнопка: {button.label}",
+                f"id: {button.id}",
+                f"Тип: {button.kind}",
+                f"Статус: {'показывается' if button.visible else 'скрыта'}",
+                f"Сортировка: {button.sort}",
+                "",
+                "Содержимое:",
+                content[:1500],
+            ]
+        )
+        await answer_or_edit(callback, text, reply_markup=admin_menu_button_keyboard(button))
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action.in_({"mbedit", "mbtext", "mbsort"})))
+async def admin_menu_button_edit_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    labels = {
+        "mbedit": "новое название кнопки",
+        "mbtext": "новое содержимое кнопки",
+        "mbsort": "новый порядок сортировки",
+    }
+    try:
+        await _admin(session, settings, callback)
+        button = await get_menu_button(session, callback_data.entity)
+        if callback_data.action == "mbtext" and button.kind != "text":
+            raise ValidationError("У этой кнопки нет текстового содержимого.")
+        await state.set_state(MenuButtonEditState.value)
+        await state.update_data(button_id=button.id, field=callback_data.action)
+        await answer_or_edit(callback, f"✏️ Введите {labels[callback_data.action]}.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(MenuButtonEditState.value))
+async def admin_menu_button_edit_value(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        button_id = str(data["button_id"])
+        field = str(data["field"])
+        raw = (message.text or "").strip()
+        button = await get_menu_button(session, button_id)
+        if field == "mbedit":
+            button = await update_menu_button(
+                session,
+                button_id=button_id,
+                label=raw,
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        elif field == "mbsort":
+            button = await update_menu_button(
+                session,
+                button_id=button_id,
+                sort=_parse_sort_order(raw),
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        elif field == "mbtext":
+            if not button.setting_key:
+                raise ValidationError("У кнопки нет текстового содержимого.")
+            await set_setting_text(
+                session,
+                key=button.setting_key,
+                value=raw,
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        await state.clear()
+        await message.answer("✅ Кнопка обновлена.", reply_markup=admin_menu_button_keyboard(button))
+    except (KeyError, ValueError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "mbtog"))
+async def admin_menu_button_toggle(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        button = await get_menu_button(session, callback_data.entity)
+        button = await update_menu_button(
+            session,
+            button_id=button.id,
+            visible=not button.visible,
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await answer_or_edit(callback, "✅ Видимость изменена.", reply_markup=admin_menu_button_keyboard(button))
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "mbdel"))
+async def admin_menu_button_delete(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        await delete_menu_button(
+            session,
+            button_id=callback_data.entity,
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        buttons = await get_menu_buttons(session)
+        await answer_or_edit(callback, "🗑 Кнопка удалена.", reply_markup=admin_menu_buttons_keyboard(buttons))
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "mbnew"))
+async def admin_menu_button_create_start(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await state.set_state(MenuButtonCreateState.label)
+        await answer_or_edit(callback, "➕ Введите название новой кнопки.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(MenuButtonCreateState.label))
+async def admin_menu_button_create_label(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, message)
+        label = (message.text or "").strip()
+        if not label:
+            raise ValidationError("Название не может быть пустым.")
+        await state.update_data(label=label)
+        await state.set_state(MenuButtonCreateState.content)
+        await message.answer("📝 Введите содержимое новой кнопки.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await message.answer(str(exc))
+
+
+@router.message(StateFilter(MenuButtonCreateState.content))
+async def admin_menu_button_create_content(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        button = await create_text_menu_button(
+            session,
+            label=str(data["label"]),
+            content=(message.text or "").strip(),
+            actor_telegram_id=message.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await state.clear()
+        await message.answer("✅ Кнопка создана.", reply_markup=admin_menu_button_keyboard(button))
+    except (KeyError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "broadcast"))
+async def admin_broadcast_start(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await state.set_state(BroadcastState.target)
+        await answer_or_edit(
+            callback,
+            "📣 Введите аудиторию рассылки: all, buyers или product:id.",
+            reply_markup=admin_product_cancel_keyboard(),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(BroadcastState.target))
+async def admin_broadcast_target(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, message)
+        target = (message.text or "").strip()
+        if target not in {"all", "buyers"} and not target.startswith("product:"):
+            raise ValidationError("Аудитория: all, buyers или product:id.")
+        await state.update_data(target=target)
+        await state.set_state(BroadcastState.text)
+        await message.answer("📝 Введите текст рассылки.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await message.answer(str(exc))
+
+
+@router.message(StateFilter(BroadcastState.text))
+async def admin_broadcast_text(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        target_raw = str(data["target"])
+        target_type = target_raw
+        product_id: int | None = None
+        if target_raw.startswith("product:"):
+            target_type = "product"
+            product_id = int(target_raw.split(":", 1)[1])
+        broadcast = await create_broadcast(
+            session,
+            target_type=target_type,
+            product_id=product_id,
+            text=(message.text or "").strip(),
+            admin_id=admin.id if admin else None,
+        )
+        broadcast = await run_broadcast(session, message.bot, broadcast.id)
+        await state.clear()
+        await message.answer(
+            f"✅ Рассылка завершена. Отправлено: {broadcast.sent_count}, ошибок: {broadcast.error_count}",
+            reply_markup=admin_menu(),
+        )
+    except (KeyError, ValueError, AppError) as exc:
+        await message.answer(str(exc))
 
 
 @router.callback_query(AdminCb.filter(F.action == "pview"))
@@ -309,14 +858,14 @@ async def admin_product_create_start(
         if page.total == 0:
             await answer_or_edit(
                 callback,
-                "Сначала создайте и включите хотя бы одну категорию.",
-                reply_markup=admin_back(),
+                "📁 Для создания товара нужна хотя бы одна активная категория.",
+                reply_markup=admin_empty_product_tree_keyboard(reason="category"),
             )
             await callback.answer()
             return
         await answer_or_edit(
             callback,
-            "Создание товара\n\nВыберите категорию.",
+            "📦 Создание товара\n\n📁 Выберите категорию.",
             reply_markup=admin_category_select_keyboard(page, action="pcat", back_action="cancel"),
         )
     except AppError as exc:
@@ -339,7 +888,7 @@ async def admin_product_create_category(
             page = await list_categories(session, page=callback_data.page, active_only=True)
             await answer_or_edit(
                 callback,
-                "Создание товара\n\nВыберите категорию.",
+                "📦 Создание товара\n\n📁 Выберите категорию.",
                 reply_markup=admin_category_select_keyboard(page, action="pcat", back_action="cancel"),
             )
         else:
@@ -354,18 +903,17 @@ async def admin_product_create_category(
             if page.total == 0:
                 await answer_or_edit(
                     callback,
-                    "В выбранной категории нет активных подкатегорий. Сначала создайте и включите подкатегорию.",
-                    reply_markup=admin_category_select_keyboard(
-                        await list_categories(session, page=0, active_only=True),
-                        action="pcat",
-                        back_action="cancel",
+                    "🗂 В выбранной категории нет активных подкатегорий.",
+                    reply_markup=admin_empty_product_tree_keyboard(
+                        reason="subcategory",
+                        category_id=category_id,
                     ),
                 )
                 await callback.answer()
                 return
             await answer_or_edit(
                 callback,
-                "Создание товара\n\nВыберите подкатегорию.",
+                "📦 Создание товара\n\n🗂 Выберите подкатегорию.",
                 reply_markup=admin_subcategory_select_keyboard(category_id, page, action="psub"),
             )
     except AppError as exc:
@@ -394,7 +942,7 @@ async def admin_product_create_subcategory(
             )
             await answer_or_edit(
                 callback,
-                "Создание товара\n\nВыберите подкатегорию.",
+                "📦 Создание товара\n\n🗂 Выберите подкатегорию.",
                 reply_markup=admin_subcategory_select_keyboard(category_id, page, action="psub"),
             )
         else:
@@ -402,7 +950,7 @@ async def admin_product_create_subcategory(
             await state.set_state(ProductCreateState.title)
             await answer_or_edit(
                 callback,
-                "Введите название товара.",
+                "✏️ Введите название товара.",
                 reply_markup=admin_product_cancel_keyboard(),
             )
     except (ValueError, AppError) as exc:
@@ -424,7 +972,7 @@ async def admin_product_flow_cancel(
         await callback.answer("Нет доступа.", show_alert=True)
         return
     await state.clear()
-    await answer_or_edit(callback, "Действие отменено.", reply_markup=admin_menu())
+    await answer_or_edit(callback, "❌ Действие отменено.", reply_markup=admin_menu())
     await callback.answer()
 
 
@@ -443,7 +991,7 @@ async def admin_product_create_title(
         await state.update_data(title=title)
         await state.set_state(ProductCreateState.description)
         await message.answer(
-            "Введите описание товара или нажмите «Пропустить».",
+            "📝 Введите описание товара или нажмите «Пропустить».",
             reply_markup=admin_product_skip_keyboard("desc"),
         )
     except AppError as exc:
@@ -462,7 +1010,7 @@ async def admin_product_create_description(
         description = (message.text or "").strip()
         await state.update_data(description="" if description == "-" else description)
         await state.set_state(ProductCreateState.price)
-        await message.answer("Введите цену, например 199.00.", reply_markup=admin_product_cancel_keyboard())
+        await message.answer("💰 Введите цену, например 199.00.", reply_markup=admin_product_cancel_keyboard())
     except AppError as exc:
         await message.answer(str(exc))
 
@@ -479,7 +1027,7 @@ async def admin_product_create_price(
         price = _parse_price(message.text or "")
         await state.update_data(price=str(price))
         await state.set_state(ProductCreateState.currency)
-        await message.answer("Введите валюту ISO-4217, например RUB.", reply_markup=admin_product_cancel_keyboard())
+        await message.answer("💱 Введите валюту ISO-4217, например RUB.", reply_markup=admin_product_cancel_keyboard())
     except AppError as exc:
         await message.answer(str(exc))
 
@@ -499,7 +1047,7 @@ async def admin_product_create_currency(
         await state.update_data(currency=currency)
         await state.set_state(ProductCreateState.sort_order)
         await message.answer(
-            "Введите порядок сортировки или нажмите «Пропустить».",
+            "🔢 Введите порядок сортировки или нажмите «Пропустить».",
             reply_markup=admin_product_skip_keyboard("sort"),
         )
     except AppError as exc:
@@ -537,7 +1085,7 @@ async def admin_product_create_skip(
             await state.set_state(ProductCreateState.price)
             await answer_or_edit(
                 callback,
-                "Введите цену, например 199.00.",
+                "💰 Введите цену, например 199.00.",
                 reply_markup=admin_product_cancel_keyboard(),
             )
         elif callback_data.entity == "sort":
@@ -556,14 +1104,14 @@ async def _show_product_create_confirm(target: Message | CallbackQuery, state: F
     data = await state.get_data()
     text = "\n".join(
         [
-            "Проверьте товар перед созданием:",
-            f"Категория ID: {data.get('category_id')}",
-            f"Подкатегория ID: {data.get('subcategory_id')}",
-            f"Название: {data.get('title')}",
-            f"Цена: {data.get('price')} {data.get('currency')}",
-            f"Сортировка: {data.get('sort_order', 100)}",
+            "✅ Проверьте товар перед созданием:",
+            f"📁 Категория ID: {data.get('category_id')}",
+            f"🗂 Подкатегория ID: {data.get('subcategory_id')}",
+            f"✏️ Название: {data.get('title')}",
+            f"💰 Цена: {data.get('price')} {data.get('currency')}",
+            f"🔢 Сортировка: {data.get('sort_order', 100)}",
             "",
-            "Описание:",
+            "📝 Описание:",
             data.get("description") or "-",
         ]
     )
@@ -597,7 +1145,7 @@ async def admin_product_create_confirm(
     except (KeyError, ValueError, InvalidOperation, AppError) as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    await callback.answer("Товар создан.")
+        await callback.answer("✅ Товар создан.")
 
 
 @router.callback_query(AdminCb.filter(F.action == "pedit"))
@@ -627,7 +1175,7 @@ async def admin_product_edit_start(
         )
         await answer_or_edit(
             callback,
-            f"Введите {field_labels[callback_data.entity]}.",
+            f"✏️ Введите {field_labels[callback_data.entity]}.",
             reply_markup=admin_product_cancel_keyboard(),
         )
     except AppError as exc:
@@ -724,7 +1272,7 @@ async def admin_product_toggle_active(
     except AppError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    await callback.answer("Статус изменен.")
+    await callback.answer("✅ Статус изменен.")
 
 
 @router.callback_query(AdminCb.filter(F.action == "pdel"))
@@ -746,13 +1294,720 @@ async def admin_product_delete(
         page = await _products_page(session, page=callback_data.page)
         await answer_or_edit(
             callback,
-            "Товар отключен и отмечен в audit log.\n\nВыберите следующий товар.",
+            "🗑 Товар отключен и отмечен в audit log.\n\n📦 Выберите следующий товар.",
             reply_markup=admin_products_keyboard(page),
         )
     except AppError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    await callback.answer("Товар отключен.")
+    await callback.answer("🗑 Товар отключен.")
+
+
+@router.callback_query(AdminCb.filter(F.action == "items"))
+async def admin_digital_items_product(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await _show_digital_product(
+            callback,
+            session,
+            product_id=callback_data.object_id,
+            page=callback_data.page,
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "iupload"))
+async def admin_digital_upload_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await state.set_state(DigitalItemUploadState.values)
+        await state.update_data(product_id=callback_data.object_id, page=callback_data.page)
+        await answer_or_edit(
+            callback,
+            "➕ Отправьте коды сообщением: один код на строку. Можно прислать .txt или .csv документ.",
+            reply_markup=admin_product_cancel_keyboard(),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(DigitalItemUploadState.values))
+async def admin_digital_upload_values(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        product_id = int(data["product_id"])
+        if message.document:
+            tg_file = await message.bot.get_file(message.document.file_id)
+            downloaded = await message.bot.download_file(tg_file.file_path)
+            body = downloaded.read().decode("utf-8")
+            is_csv = (message.document.file_name or "").lower().endswith(".csv")
+        else:
+            body = message.text or ""
+            is_csv = "," in body
+        values, parse_errors = parse_items_csv(body) if is_csv else parse_items_text(body)
+        result = await import_digital_items(
+            session,
+            product_id=product_id,
+            raw_values=values,
+            actor_telegram_id=message.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await state.clear()
+        await message.answer(
+            "\n".join(
+                [
+                    "✅ Импорт завершен",
+                    f"📦 Обработано: {result.processed + parse_errors}",
+                    f"➕ Добавлено: {result.added}",
+                    f"⏭ Пропущено: {result.skipped}",
+                    f"♻️ Дублей: {result.duplicates}",
+                    f"⚠️ Ошибок: {result.errors + parse_errors}",
+                ]
+            )
+        )
+        await _show_digital_product(message, session, product_id=product_id, page=int(data.get("page") or 0))
+    except (KeyError, ValueError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "iexport"))
+async def admin_digital_export(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        content = await export_digital_items_csv(session, product_id=callback_data.object_id)
+        file = BufferedInputFile(content.encode("utf-8"), filename=f"product-{callback_data.object_id}-items.csv")
+        await callback.message.answer_document(file) if callback.message else None
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("📤 Экспорт готов.")
+
+
+@router.callback_query(AdminCb.filter(F.action == "isearch"))
+async def admin_digital_search_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await state.set_state(DigitalItemSearchState.query)
+        await state.update_data(product_id=callback_data.object_id, page=callback_data.page)
+        await answer_or_edit(callback, "🔎 Введите часть кода для поиска.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(DigitalItemSearchState.query))
+async def admin_digital_search_query(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, message)
+        data = await state.get_data()
+        product_id = int(data["product_id"])
+        items = await search_digital_items(
+            session,
+            query=(message.text or "").strip(),
+            product_id=product_id,
+            limit=20,
+        )
+        await state.clear()
+        if not items:
+            await message.answer("🔎 Ничего не найдено.", reply_markup=admin_digital_product_keyboard(product_id))
+            return
+        text = "🔎 Найденные коды\n\n" + "\n".join(
+            f"#{item.id} · {item.status} · {item.value[:80]}" for item in items
+        )
+        await message.answer(
+            text,
+            reply_markup=admin_digital_search_keyboard(
+                items,
+                product_id=product_id,
+                page=int(data.get("page") or 0),
+            ),
+        )
+    except (KeyError, ValueError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "iview"))
+async def admin_digital_item_view(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        item = await session.get(DigitalItem, callback_data.object_id)
+        if item is None:
+            raise ValidationError("Код не найден.")
+        text = "\n".join(
+            [
+                f"🔑 Код #{item.id}",
+                f"📦 product_id: {item.product_id}",
+                f"📌 Статус: {item.status}",
+                f"🧾 order_id: {item.order_id or '-'}",
+                "",
+                item.value,
+            ]
+        )
+        await answer_or_edit(
+            callback,
+            text,
+            reply_markup=admin_digital_item_keyboard(
+                item.id,
+                product_id=item.product_id,
+                page=callback_data.page,
+            ),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "iedit"))
+async def admin_digital_item_edit_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        item = await session.get(DigitalItem, callback_data.object_id)
+        if item is None:
+            raise ValidationError("Код не найден.")
+        await state.set_state(DigitalItemEditState.value)
+        await state.update_data(item_id=item.id, product_id=item.product_id, page=callback_data.page)
+        await answer_or_edit(callback, "✏️ Введите новое значение кода.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(DigitalItemEditState.value))
+async def admin_digital_item_edit_value(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        item = await update_digital_item_value(
+            session,
+            item_id=int(data["item_id"]),
+            value=message.text or "",
+            actor_telegram_id=message.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await state.clear()
+        await message.answer("✅ Код обновлен.")
+        await _show_digital_product(message, session, product_id=item.product_id, page=int(data.get("page") or 0))
+    except (KeyError, ValueError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "idel"))
+async def admin_digital_item_delete(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        item = await delete_digital_item(
+            session,
+            item_id=callback_data.object_id,
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await _show_digital_product(callback, session, product_id=item.product_id, page=callback_data.page)
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("🗑 Код удален.")
+
+
+@router.callback_query(AdminCb.filter(F.action == "cview"))
+async def admin_category_view(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await _show_category_card(callback, session, category_id=callback_data.object_id, page=callback_data.page)
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "cnew"))
+async def admin_category_create_start(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await state.clear()
+        await state.set_state(CategoryCreateState.title)
+        await answer_or_edit(callback, "📁 Введите название категории.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(CategoryCreateState.title))
+async def admin_category_create_title(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        title = (message.text or "").strip()
+        category = await create_category(
+            session,
+            title=title,
+            actor_telegram_id=message.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await state.clear()
+        await _show_category_card(message, session, category_id=category.id)
+    except AppError as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "cedit"))
+async def admin_category_edit_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    labels = {"title": "новое название категории", "sort": "новый порядок сортировки"}
+    try:
+        await _admin(session, settings, callback)
+        if callback_data.entity not in labels:
+            raise ValidationError("Поле не поддерживается.")
+        await state.set_state(CategoryEditState.value)
+        await state.update_data(
+            category_id=callback_data.object_id,
+            field=callback_data.entity,
+            page=callback_data.page,
+        )
+        await answer_or_edit(callback, f"✏️ Введите {labels[callback_data.entity]}.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(CategoryEditState.value))
+async def admin_category_edit_value(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        category_id = int(data["category_id"])
+        field = str(data["field"])
+        raw_value = (message.text or "").strip()
+        if field == "title":
+            await update_entity_title(
+                session,
+                entity="category",
+                entity_id=category_id,
+                title=raw_value,
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        elif field == "sort":
+            await update_entity_sort_order(
+                session,
+                entity="category",
+                entity_id=category_id,
+                sort_order=_parse_sort_order(raw_value),
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        else:
+            raise ValidationError("Поле не поддерживается.")
+        page = int(data.get("page") or 0)
+        await state.clear()
+        await _show_category_card(message, session, category_id=category_id, page=page)
+    except (KeyError, ValueError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "ctog"))
+async def admin_category_toggle_active(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        category = await session.get(Category, callback_data.object_id)
+        if category is None:
+            raise ValidationError("Категория не найдена.")
+        await set_entity_active(
+            session,
+            entity="category",
+            entity_id=category.id,
+            is_active=not category.is_active,
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await _show_category_card(callback, session, category_id=category.id, page=callback_data.page)
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("✅ Статус изменен.")
+
+
+@router.callback_query(AdminCb.filter(F.action == "cdel"))
+async def admin_category_delete(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        await soft_delete_entity(
+            session,
+            entity="category",
+            entity_id=callback_data.object_id,
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        page = await _categories_page(session, page=callback_data.page)
+        await answer_or_edit(
+            callback,
+            "🗑 Категория отключена и отмечена в audit log.",
+            reply_markup=admin_categories_keyboard(page),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("🗑 Категория отключена.")
+
+
+@router.callback_query(AdminCb.filter(F.action == "sview"))
+async def admin_subcategory_view(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await _show_subcategory_card(
+            callback,
+            session,
+            subcategory_id=callback_data.object_id,
+            page=callback_data.page,
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "snew"))
+async def admin_subcategory_create_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await state.clear()
+        category_id = callback_data.object_id
+        if category_id:
+            category = await session.get(Category, category_id)
+            if category is None:
+                raise ValidationError("Категория не найдена.")
+            await state.update_data(category_id=category_id)
+            await state.set_state(SubcategoryCreateState.title)
+            await answer_or_edit(
+                callback,
+                f"🗂 Новая подкатегория для категории «{category.title}».\n\n✏️ Введите название подкатегории.",
+                reply_markup=admin_product_cancel_keyboard(),
+            )
+        else:
+            page = await list_categories(session, page=callback_data.page, active_only=False)
+            if page.total == 0:
+                await answer_or_edit(
+                    callback,
+                    "📁 Сначала создайте категорию.",
+                    reply_markup=admin_empty_product_tree_keyboard(reason="category"),
+                )
+            else:
+                await answer_or_edit(
+                    callback,
+                    "📁 Выберите категорию для новой подкатегории.",
+                    reply_markup=admin_category_select_keyboard(
+                        page,
+                        action="scat",
+                        back_action="list",
+                        back_entity="subs",
+                        back_text="К подкатегориям",
+                    ),
+                )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(AdminCb.filter(F.action == "scat"))
+async def admin_subcategory_create_category(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        if callback_data.entity == "catp":
+            page = await list_categories(session, page=callback_data.page, active_only=False)
+            await answer_or_edit(
+                callback,
+                "📁 Выберите категорию для новой подкатегории.",
+                reply_markup=admin_category_select_keyboard(
+                    page,
+                    action="scat",
+                    back_action="list",
+                    back_entity="subs",
+                    back_text="К подкатегориям",
+                ),
+            )
+        else:
+            category = await session.get(Category, callback_data.object_id)
+            if category is None:
+                raise ValidationError("Категория не найдена.")
+            await state.update_data(category_id=category.id)
+            await state.set_state(SubcategoryCreateState.title)
+            await answer_or_edit(
+                callback,
+                f"🗂 Новая подкатегория для категории «{category.title}».\n\n✏️ Введите название подкатегории.",
+                reply_markup=admin_product_cancel_keyboard(),
+            )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(SubcategoryCreateState.title))
+async def admin_subcategory_create_title(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        subcategory = await create_subcategory(
+            session,
+            category_id=int(data["category_id"]),
+            title=(message.text or "").strip(),
+            actor_telegram_id=message.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await state.clear()
+        await _show_subcategory_card(message, session, subcategory_id=subcategory.id)
+    except (KeyError, ValueError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "sedit"))
+async def admin_subcategory_edit_start(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    labels = {"title": "новое название подкатегории", "sort": "новый порядок сортировки"}
+    try:
+        await _admin(session, settings, callback)
+        if callback_data.entity not in labels:
+            raise ValidationError("Поле не поддерживается.")
+        await state.set_state(SubcategoryEditState.value)
+        await state.update_data(
+            subcategory_id=callback_data.object_id,
+            field=callback_data.entity,
+            page=callback_data.page,
+        )
+        await answer_or_edit(callback, f"✏️ Введите {labels[callback_data.entity]}.", reply_markup=admin_product_cancel_keyboard())
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(StateFilter(SubcategoryEditState.value))
+async def admin_subcategory_edit_value(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    try:
+        admin = await _admin(session, settings, message)
+        data = await state.get_data()
+        subcategory_id = int(data["subcategory_id"])
+        field = str(data["field"])
+        raw_value = (message.text or "").strip()
+        if field == "title":
+            await update_entity_title(
+                session,
+                entity="subcategory",
+                entity_id=subcategory_id,
+                title=raw_value,
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        elif field == "sort":
+            await update_entity_sort_order(
+                session,
+                entity="subcategory",
+                entity_id=subcategory_id,
+                sort_order=_parse_sort_order(raw_value),
+                actor_telegram_id=message.from_user.id,
+                admin_id=admin.id if admin else None,
+            )
+        else:
+            raise ValidationError("Поле не поддерживается.")
+        page = int(data.get("page") or 0)
+        await state.clear()
+        await _show_subcategory_card(message, session, subcategory_id=subcategory_id, page=page)
+    except (KeyError, ValueError, AppError) as exc:
+        await message.answer(str(exc))
+
+
+@router.callback_query(AdminCb.filter(F.action == "stog"))
+async def admin_subcategory_toggle_active(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        subcategory = await session.get(Subcategory, callback_data.object_id)
+        if subcategory is None:
+            raise ValidationError("Подкатегория не найдена.")
+        await set_entity_active(
+            session,
+            entity="subcategory",
+            entity_id=subcategory.id,
+            is_active=not subcategory.is_active,
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        await _show_subcategory_card(
+            callback,
+            session,
+            subcategory_id=subcategory.id,
+            page=callback_data.page,
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("✅ Статус изменен.")
+
+
+@router.callback_query(AdminCb.filter(F.action == "sdel"))
+async def admin_subcategory_delete(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        admin = await _admin(session, settings, callback)
+        subcategory = await session.get(Subcategory, callback_data.object_id)
+        if subcategory is None:
+            raise ValidationError("Подкатегория не найдена.")
+        category_id = subcategory.category_id
+        await soft_delete_entity(
+            session,
+            entity="subcategory",
+            entity_id=subcategory.id,
+            actor_telegram_id=callback.from_user.id,
+            admin_id=admin.id if admin else None,
+        )
+        page = await _subcategories_page(session, page=callback_data.page, category_id=category_id)
+        await answer_or_edit(
+            callback,
+            "🗑 Подкатегория отключена и отмечена в audit log.",
+            reply_markup=admin_subcategories_keyboard(page, category_id=category_id),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("🗑 Подкатегория отключена.")
 
 
 @router.callback_query(AdminCb.filter((F.action == "view") & (F.entity == "order")))
@@ -768,31 +2023,33 @@ async def admin_order_view(
     except AccessDenied:
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    item_value = order.issued_item.value if order.issued_item else "-"
+    item_values = [item.value for item in order.issued_items] if order.issued_items else []
+    item_value = "\n".join(f"`{value}`" for value in item_values) if item_values else "-"
     payment_id = order.payments[0].id if order.payments else "-"
     text = "\n".join(
         [
-            f"Заказ #{order.id}",
-            f"Пользователь: {order.user.id}",
+            f"🧾 Заказ #{order.id}",
+            f"👤 Пользователь: {order.user.id}",
             f"telegram_id: {order.user.telegram_id}",
             f"username: @{order.user.username or '-'}",
-            f"Товар: {order.product.title}",
-            f"category_id: {order.category_id}",
-            f"subcategory_id: {order.subcategory_id}",
-            f"Сумма: {order.amount} {order.currency}",
-            f"Статус: {order.status}",
-            f"Создан: {order.created_at}",
-            f"Оплачен: {order.paid_at or '-'}",
+            f"📦 Товар: {order.product.title}",
+            f"📁 category_id: {order.category_id}",
+            f"🗂 subcategory_id: {order.subcategory_id}",
+            f"🔢 Количество: {order.quantity}",
+            f"💰 Сумма: {order.amount} {order.currency}",
+            f"📌 Статус: {order.status}",
+            f"🕒 Создан: {order.created_at}",
+            f"✅ Оплачен: {order.paid_at or '-'}",
             f"payment_id: {payment_id}",
             f"telegram_payment_charge_id: {order.telegram_payment_charge_id or '-'}",
             f"provider_payment_charge_id: {order.provider_payment_charge_id or '-'}",
-            f"Код: `{item_value}`",
+            f"🔑 Коды:\n{item_value}",
         ]
     )
     await answer_or_edit(
         callback,
         text,
-        reply_markup=admin_order_keyboard(order.id, has_item=order.issued_item is not None),
+        reply_markup=admin_order_keyboard(order.id, has_item=bool(order.issued_items)),
     )
     await callback.answer()
 
@@ -807,17 +2064,18 @@ async def admin_resend_code(
     try:
         await _admin(session, settings, callback)
         order = await get_order_detail(session, callback_data.object_id)
-        if order.issued_item is None:
+        if not order.issued_items:
             raise ValidationError("У заказа нет выданного кода.")
+        values = "\n".join(f"`{item.value}`" for item in order.issued_items)
         await callback.bot.send_message(
             order.user.telegram_id,
-            f"Повторная отправка цифрового товара по заказу #{order.id}:\n`{order.issued_item.value}`",
+            f"Повторная отправка цифровых товаров по заказу #{order.id}:\n{values}",
             parse_mode="Markdown",
         )
     except AppError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    await callback.answer("Код отправлен.")
+    await callback.answer("🔁 Код отправлен.")
 
 
 @router.message(Command("admin_set_order_status"))
@@ -832,9 +2090,9 @@ async def cmd_set_order_status(message: Message, session: AsyncSession, settings
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Статус заказа обновлен.")
+        await message.answer("✅ Статус заказа обновлен.")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_set_order_status order_id pending|paid|cancelled|error|refunded")
+        await message.answer("ℹ️ Формат: /admin_set_order_status order_id pending|paid|cancelled|error|refunded")
 
 
 @router.message(Command("admin_comment_order"))
@@ -849,9 +2107,9 @@ async def cmd_comment_order(message: Message, session: AsyncSession, settings: S
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Комментарий к заказу обновлен.")
+        await message.answer("✅ Комментарий к заказу обновлен.")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_comment_order order_id комментарий")
+        await message.answer("ℹ️ Формат: /admin_comment_order order_id комментарий")
 
 
 @router.message(Command("admin_create_category"))
@@ -865,9 +2123,9 @@ async def cmd_create_category(message: Message, session: AsyncSession, settings:
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer(f"Категория создана: {category.id}")
+        await message.answer(f"✅📁 Категория создана: {category.id}")
     except (IndexError, AppError):
-        await message.answer("Формат: /admin_create_category Название")
+        await message.answer("ℹ️ Формат: /admin_create_category Название")
 
 
 @router.message(Command("admin_create_subcategory"))
@@ -882,9 +2140,9 @@ async def cmd_create_subcategory(message: Message, session: AsyncSession, settin
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer(f"Подкатегория создана: {subcategory.id}")
+        await message.answer(f"✅🗂 Подкатегория создана: {subcategory.id}")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_create_subcategory category_id Название")
+        await message.answer("ℹ️ Формат: /admin_create_subcategory category_id Название")
 
 
 @router.message(Command("admin_create_product"))
@@ -905,10 +2163,10 @@ async def cmd_create_product(message: Message, session: AsyncSession, settings: 
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer(f"Товар создан: {product.id}")
+        await message.answer(f"✅📦 Товар создан: {product.id}")
     except (ValueError, IndexError, AppError):
         await message.answer(
-            "Формат: /admin_create_product category_id subcategory_id | Название | 100.00 | RUB | Описание"
+            "ℹ️ Формат: /admin_create_product category_id subcategory_id | Название | 100.00 | RUB | Описание"
         )
 
 
@@ -925,9 +2183,9 @@ async def cmd_set_active(message: Message, session: AsyncSession, settings: Sett
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Статус изменен.")
+        await message.answer("✅ Статус изменен.")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_set_active category|subcategory|product id true|false")
+        await message.answer("ℹ️ Формат: /admin_set_active category|subcategory|product id true|false")
 
 
 @router.message(Command("admin_rename"))
@@ -943,9 +2201,9 @@ async def cmd_rename_entity(message: Message, session: AsyncSession, settings: S
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Название обновлено.")
+        await message.answer("✅ Название обновлено.")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_rename category|subcategory|product id Новое название")
+        await message.answer("ℹ️ Формат: /admin_rename category|subcategory|product id Новое название")
 
 
 @router.message(Command("admin_sort"))
@@ -961,9 +2219,9 @@ async def cmd_sort_entity(message: Message, session: AsyncSession, settings: Set
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Сортировка обновлена.")
+        await message.answer("✅ Сортировка обновлена.")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_sort category|subcategory|product id sort_order")
+        await message.answer("ℹ️ Формат: /admin_sort category|subcategory|product id sort_order")
 
 
 @router.message(Command("admin_delete_entity"))
@@ -978,9 +2236,9 @@ async def cmd_delete_entity(message: Message, session: AsyncSession, settings: S
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Сущность отключена и отмечена в audit log.")
+        await message.answer("🗑 Сущность отключена и отмечена в audit log.")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_delete_entity category|subcategory|product id")
+        await message.answer("ℹ️ Формат: /admin_delete_entity category|subcategory|product id")
 
 
 @router.message(Command("admin_update_price"))
@@ -995,9 +2253,9 @@ async def cmd_update_price(message: Message, session: AsyncSession, settings: Se
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Цена обновлена.")
+        await message.answer("✅ Цена обновлена.")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_update_price product_id 100.00")
+        await message.answer("ℹ️ Формат: /admin_update_price product_id 100.00")
 
 
 @router.message(Command("admin_upload_items"))
@@ -1026,17 +2284,17 @@ async def cmd_upload_items(message: Message, session: AsyncSession, settings: Se
         await message.answer(
             "\n".join(
                 [
-                    "Импорт завершен",
-                    f"Обработано: {result.processed + parse_errors}",
-                    f"Добавлено: {result.added}",
-                    f"Пропущено: {result.skipped}",
-                    f"Дублей: {result.duplicates}",
-                    f"Ошибок: {result.errors + parse_errors}",
+                    "✅ Импорт завершен",
+                    f"📦 Обработано: {result.processed + parse_errors}",
+                    f"➕ Добавлено: {result.added}",
+                    f"⏭ Пропущено: {result.skipped}",
+                    f"♻️ Дублей: {result.duplicates}",
+                    f"⚠️ Ошибок: {result.errors + parse_errors}",
                 ]
             )
         )
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_upload_items product_id\\ncode1\\ncode2 или документ .txt/.csv с caption")
+        await message.answer("ℹ️ Формат: /admin_upload_items product_id\\ncode1\\ncode2 или документ .txt/.csv с caption")
 
 
 @router.message(Command("admin_export_items"))
@@ -1048,7 +2306,7 @@ async def cmd_export_items(message: Message, session: AsyncSession, settings: Se
         file = BufferedInputFile(content.encode("utf-8"), filename=f"product-{product_id}-items.csv")
         await message.answer_document(file)
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_export_items product_id")
+        await message.answer("ℹ️ Формат: /admin_export_items product_id")
 
 
 @router.message(Command("admin_search_items"))
@@ -1058,17 +2316,17 @@ async def cmd_search_items(message: Message, session: AsyncSession, settings: Se
         query = message.text.split(maxsplit=1)[1]
         items = await search_digital_items(session, query=query, limit=20)
         if not items:
-            await message.answer("Ничего не найдено.")
+            await message.answer("🔎 Ничего не найдено.")
             return
         await message.answer(
-            "Найденные коды\n\n"
+            "🔎 Найденные коды\n\n"
             + "\n".join(
                 f"{item.id}: product={item.product_id} status={item.status} value={item.value[:80]}"
                 for item in items
             )
         )
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_search_items часть_кода")
+        await message.answer("ℹ️ Формат: /admin_search_items часть_кода")
 
 
 @router.message(Command("admin_update_item"))
@@ -1083,9 +2341,9 @@ async def cmd_update_item(message: Message, session: AsyncSession, settings: Set
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer(f"Код обновлен: {item.id}")
+        await message.answer(f"✅🔑 Код обновлен: {item.id}")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_update_item item_id новое_значение")
+        await message.answer("ℹ️ Формат: /admin_update_item item_id новое_значение")
 
 
 @router.message(Command("admin_delete_item"))
@@ -1099,9 +2357,9 @@ async def cmd_delete_item(message: Message, session: AsyncSession, settings: Set
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Код удален.")
+        await message.answer("🗑 Код удален.")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_delete_item item_id")
+        await message.answer("ℹ️ Формат: /admin_delete_item item_id")
 
 
 @router.message(Command("admin_set_text"))
@@ -1110,7 +2368,7 @@ async def cmd_set_text(message: Message, session: AsyncSession, settings: Settin
         admin = await _admin(session, settings, message)
         header, body = (message.text or "").split("\n", 1)
         key = header.split(maxsplit=1)[1].strip()
-        if key not in {"support_text", "faq_text", "rules_text"}:
+        if key not in {"welcome_text", "support_text", "faq_text", "rules_text", "privacy_text", "terms_text"}:
             raise ValidationError("unsupported setting key")
         await set_setting_text(
             session,
@@ -1119,9 +2377,9 @@ async def cmd_set_text(message: Message, session: AsyncSession, settings: Settin
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Текст обновлен.")
+        await message.answer("✅ Текст обновлен.")
     except (IndexError, ValueError, AppError):
-        await message.answer("Формат: /admin_set_text support_text|faq_text|rules_text\\nТекст")
+        await message.answer("ℹ️ Формат: /admin_set_text welcome_text|support_text|faq_text|rules_text|privacy_text|terms_text\\nТекст")
 
 
 @router.message(Command("admin_block_user"))
@@ -1154,9 +2412,9 @@ async def _block_command(
             actor_telegram_id=message.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await message.answer("Готово.")
+        await message.answer("✅ Готово.")
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_block_user user_db_id причина")
+        await message.answer("ℹ️ Формат: /admin_block_user user_db_id причина")
 
 
 @router.message(Command("admin_broadcast"))
@@ -1179,7 +2437,7 @@ async def cmd_broadcast(message: Message, session: AsyncSession, settings: Setti
         )
         broadcast = await run_broadcast(session, message.bot, broadcast.id)
         await message.answer(
-            f"Рассылка завершена. Отправлено: {broadcast.sent_count}, ошибок: {broadcast.error_count}"
+            f"✅ Рассылка завершена. Отправлено: {broadcast.sent_count}, ошибок: {broadcast.error_count}"
         )
     except (ValueError, IndexError, AppError):
-        await message.answer("Формат: /admin_broadcast all|buyers|product:id\\nТекст")
+        await message.answer("ℹ️ Формат: /admin_broadcast all|buyers|product:id\\nТекст")
