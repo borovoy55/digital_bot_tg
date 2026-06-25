@@ -39,8 +39,12 @@ from app.services.catalog import ensure_product_can_be_bought
 @dataclass(frozen=True)
 class CompletedOrder:
     order: Order
-    digital_item: DigitalItem
+    digital_items: list[DigitalItem]
     already_processed: bool = False
+
+    @property
+    def digital_item(self) -> DigitalItem:
+        return self.digital_items[0]
 
 
 async def create_pending_order(
@@ -49,7 +53,11 @@ async def create_pending_order(
     settings: Settings,
     telegram_id: int,
     product_id: int,
+    quantity: int = 1,
+    payment_provider: str = "telegram",
 ) -> Order:
+    if quantity < 1:
+        raise PaymentError("quantity must be positive")
     async with session.begin():
         user = await session.scalar(
             select(User).where(User.telegram_id == telegram_id).with_for_update()
@@ -59,16 +67,17 @@ async def create_pending_order(
         if user.is_blocked:
             raise AccessDenied("user is blocked")
 
-        product = await ensure_product_can_be_bought(session, product_id)
+        product = await ensure_product_can_be_bought(session, product_id, quantity=quantity)
         order = Order(
             user_id=user.id,
             product_id=product.id,
             category_id=product.category_id,
             subcategory_id=product.subcategory_id,
-            amount=product.price,
+            amount=product.price * quantity,
+            quantity=quantity,
             currency=product.currency,
             status=OrderStatus.PENDING.value,
-            payment_provider="telegram",
+            payment_provider=payment_provider,
         )
         session.add(order)
         await session.flush()
@@ -88,7 +97,7 @@ async def _load_order_for_payment(session: AsyncSession, order_id: int, *, lock:
     stmt = (
         select(Order)
         .where(Order.id == order_id)
-        .options(selectinload(Order.issued_item), selectinload(Order.user), selectinload(Order.product))
+        .options(selectinload(Order.issued_items), selectinload(Order.user), selectinload(Order.product))
     )
     if lock:
         stmt = stmt.with_for_update()
@@ -126,16 +135,18 @@ async def validate_pre_checkout(
         raise PaymentError("currency mismatch")
     if decimal_to_minor(order.amount, order.currency) != total_amount:
         raise PaymentError("amount mismatch")
-    await ensure_product_can_be_bought(session, order.product_id)
+    await ensure_product_can_be_bought(session, order.product_id, quantity=order.quantity)
 
 
-async def _reserve_item(
+async def _reserve_items(
     session: AsyncSession,
     *,
     product_id: int,
     order_id: int,
     user_id: int,
-) -> DigitalItem:
+) -> list[DigitalItem]:
+    order = await session.get(Order, order_id)
+    quantity = order.quantity if order else 1
     stmt = (
         select(DigitalItem)
         .where(
@@ -143,20 +154,22 @@ async def _reserve_item(
             DigitalItem.status == DigitalItemStatus.AVAILABLE.value,
         )
         .order_by(DigitalItem.id.asc())
-        .limit(1)
+        .limit(quantity)
         .with_for_update(skip_locked=True)
     )
-    item = await session.scalar(stmt)
-    if item is None:
+    items = list(await session.scalars(stmt))
+    if len(items) < quantity:
         raise NoAvailableItems("no available digital items")
     now = datetime.now(timezone.utc)
-    item.status = DigitalItemStatus.RESERVED.value
-    item.order_id = order_id
-    item.sold_to_user_id = user_id
-    item.sold_at = now
+    for item in items:
+        item.status = DigitalItemStatus.RESERVED.value
+        item.order_id = order_id
+        item.sold_to_user_id = user_id
+        item.sold_at = now
     await session.flush()
-    item.status = DigitalItemStatus.SOLD.value
-    return item
+    for item in items:
+        item.status = DigitalItemStatus.SOLD.value
+    return items
 
 
 async def complete_successful_payment(
@@ -169,10 +182,11 @@ async def complete_successful_payment(
     telegram_payment_charge_id: str | None,
     provider_payment_charge_id: str | None,
     raw_payload: dict[str, Any],
+    provider_name: str = "telegram",
 ) -> CompletedOrder:
     parsed = parse_order_payload(payload)
     raise_after_commit: Exception | None = None
-    item: DigitalItem | None = None
+    items: list[DigitalItem] = []
     async with session.begin():
         order = await _load_order_for_payment(session, parsed.order_id, lock=True)
         if order.payment_payload is None:
@@ -187,9 +201,9 @@ async def complete_successful_payment(
         )
 
         if order.status == OrderStatus.PAID.value:
-            if order.issued_item is None:
+            if not order.issued_items:
                 raise PaymentError("paid order has no issued item")
-            return CompletedOrder(order=order, digital_item=order.issued_item, already_processed=True)
+            return CompletedOrder(order=order, digital_items=list(order.issued_items), already_processed=True)
         if order.status != OrderStatus.PENDING.value:
             raise PaymentError("order is not pending")
         if order.currency != currency:
@@ -220,7 +234,7 @@ async def complete_successful_payment(
 
         if raise_after_commit is None:
             try:
-                item = await _reserve_item(
+                items = await _reserve_items(
                     session,
                     product_id=order.product_id,
                     order_id=order.id,
@@ -232,7 +246,7 @@ async def complete_successful_payment(
                 raise_after_commit = exc
 
         if raise_after_commit is None:
-            assert item is not None
+            assert items
             paid_at = datetime.now(timezone.utc)
             order.status = OrderStatus.PAID.value
             order.paid_at = paid_at
@@ -243,7 +257,7 @@ async def complete_successful_payment(
                 session.add(
                     Payment(
                         order_id=order.id,
-                        provider="telegram",
+                        provider=provider_name,
                         status=PaymentStatus.SUCCEEDED.value,
                         amount=minor_to_decimal(total_amount, currency),
                         currency=currency,
@@ -254,10 +268,68 @@ async def complete_successful_payment(
                 )
     if raise_after_commit is not None:
         raise raise_after_commit
-    assert item is not None
+    assert items
     await session.refresh(order)
-    await session.refresh(item)
-    return CompletedOrder(order=order, digital_item=item)
+    for item in items:
+        await session.refresh(item)
+    return CompletedOrder(order=order, digital_items=items)
+
+
+async def complete_external_successful_payment(
+    *,
+    session: AsyncSession,
+    settings: Settings,
+    payload: str,
+    provider_name: str,
+    provider_payment_charge_id: str | None,
+    raw_payload: dict[str, Any],
+    amount: int | None = None,
+    currency: str | None = None,
+) -> CompletedOrder:
+    parsed = parse_order_payload(payload)
+    order = await _load_order_for_payment(session, parsed.order_id, lock=False)
+    total_amount = amount if amount is not None else decimal_to_minor(order.amount, order.currency)
+    payment_currency = currency or order.currency
+    return await complete_successful_payment(
+        session=session,
+        settings=settings,
+        payload=payload,
+        total_amount=total_amount,
+        currency=payment_currency,
+        telegram_payment_charge_id=None,
+        provider_payment_charge_id=provider_payment_charge_id,
+        raw_payload=raw_payload,
+        provider_name=provider_name,
+    )
+
+
+async def mark_external_payment_not_confirmed(
+    *,
+    session: AsyncSession,
+    settings: Settings,
+    payload: str,
+    status: str,
+) -> Order:
+    parsed = parse_order_payload(payload)
+    async with session.begin():
+        order = await _load_order_for_payment(session, parsed.order_id, lock=True)
+        if order.payment_payload is None:
+            raise SecurityError("order has no payment payload")
+        verify_order_payload(
+            secret=settings.callback_secret,
+            payload=payload,
+            order_id=order.id,
+            user_id=order.user_id,
+            product_id=order.product_id,
+            stored_payload=order.payment_payload,
+        )
+        if status == "CANCELED" and order.status == OrderStatus.PENDING.value:
+            order.status = OrderStatus.CANCELLED.value
+        elif status == "CHARGEBACK" and order.status == OrderStatus.PAID.value:
+            order.status = OrderStatus.REFUNDED.value
+        await session.flush()
+    await session.refresh(order)
+    return order
 
 
 async def get_order_for_user(
@@ -270,7 +342,7 @@ async def get_order_for_user(
         select(Order)
         .join(User, User.id == Order.user_id)
         .where(Order.id == order_id, User.telegram_id == telegram_id)
-        .options(selectinload(Order.product), selectinload(Order.issued_item))
+        .options(selectinload(Order.product), selectinload(Order.issued_items))
     )
     if order is None:
         raise AccessDenied("order not found")
@@ -282,7 +354,7 @@ async def list_user_orders(session: AsyncSession, *, telegram_id: int, limit: in
         select(Order)
         .join(User, User.id == Order.user_id)
         .where(User.telegram_id == telegram_id)
-        .options(selectinload(Order.product), selectinload(Order.issued_item))
+        .options(selectinload(Order.product), selectinload(Order.issued_items))
         .order_by(Order.created_at.desc())
         .limit(limit)
     )

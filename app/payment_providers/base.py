@@ -22,8 +22,12 @@ class InvoiceRequest:
 @dataclass(frozen=True)
 class PaymentResult:
     order_id: int
-    digital_item_value: str
+    digital_item_values: list[str]
     already_processed: bool = False
+
+    @property
+    def digital_item_value(self) -> str:
+        return self.digital_item_values[0]
 
 
 class PaymentProvider(ABC):

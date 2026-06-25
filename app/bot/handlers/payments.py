@@ -56,13 +56,14 @@ async def successful_payment(
     except NoAvailableItems:
         log.error("paid_order_without_inventory", payload=payment.invoice_payload)
         await message.answer(
-            "Оплата получена, но товар временно закончился. Администратор уже получил ошибку."
+            "✅ Оплата получена, но товар временно закончился. Администратор уже получил ошибку."
         )
         return
     except AppError as exc:
         log.warning("payment_processing_failed", error=str(exc), payload=payment.invoice_payload)
-        await message.answer("Платеж не удалось обработать автоматически. Обратитесь в поддержку.")
+        await message.answer("⚠️ Платеж не удалось обработать автоматически. Обратитесь в поддержку.")
         return
 
-    prefix = "Код уже был выдан ранее" if result.already_processed else "Покупка оплачена"
-    await message.answer(f"{prefix}.\n\nВаш цифровой товар:\n`{result.digital_item_value}`", parse_mode="Markdown")
+    prefix = "🔁 Коды уже были выданы ранее" if result.already_processed else "✅ Покупка оплачена"
+    values = "\n".join(f"`{value}`" for value in result.digital_item_values)
+    await message.answer(f"{prefix}.\n\n🔑 Ваши цифровые товары:\n{values}", parse_mode="Markdown")

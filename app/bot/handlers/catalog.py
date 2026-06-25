@@ -14,6 +14,7 @@ from app.bot.callbacks import CatalogCb, MenuCb, ProductCb
 from app.bot.keyboards import (
     buy_products_keyboard,
     main_menu,
+    payment_url_keyboard,
     product_keyboard,
     quantity_input_keyboard,
     quantity_keyboard,
@@ -23,6 +24,7 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.rate_limit import check_order_rate_limit
 from app.payment_providers.base import InvoiceRequest
+from app.payment_providers.platega import PlategaPaymentsProvider
 from app.payment_providers.telegram import TelegramPaymentsProvider
 from app.services.catalog import (
     PublicProduct,
@@ -344,20 +346,44 @@ async def buy_product(
             telegram_id=callback.from_user.id,
             product_id=callback_data.product_id,
             quantity=quantity,
+            payment_provider=settings.payment_provider,
         )
         product = await get_product_with_tree(session, order.product_id)
-        provider = TelegramPaymentsProvider(callback.bot, settings)
-        await provider.create_invoice(
-            InvoiceRequest(
-                chat_id=callback.from_user.id,
-                title=product.title,
-                description=f"{product.description or product.title}\nКоличество: {order.quantity}",
-                payload=order.payment_payload or "",
-                currency=order.currency,
-                amount=order.amount,
-                order_id=order.id,
-            )
+        invoice_request = InvoiceRequest(
+            chat_id=callback.from_user.id,
+            title=product.title,
+            description=f"{product.description or product.title}\nКоличество: {order.quantity}",
+            payload=order.payment_payload or "",
+            currency=order.currency,
+            amount=order.amount,
+            order_id=order.id,
         )
+        if settings.payment_provider == "platega":
+            provider = PlategaPaymentsProvider(settings)
+            invoice = await provider.create_invoice(invoice_request)
+            order.provider_invoice_id = invoice.transaction_id
+            await session.commit()
+            if callback.message is not None:
+                await answer_or_edit(
+                    callback,
+                    (
+                        "💳 Счет на оплату сформирован.\n\n"
+                        f"🛒 {product.title}\n"
+                        f"🔢 Количество: {order.quantity}\n"
+                        f"🧾 Итого: {order.amount} {order.currency}\n\n"
+                        "Нажмите кнопку ниже и завершите оплату."
+                    ),
+                    reply_markup=payment_url_keyboard(
+                        invoice.redirect_url,
+                        product_id=product.id,
+                        page=callback_data.page,
+                    ),
+                )
+            await callback.answer("Ссылка на оплату сформирована.")
+            return
+
+        provider = TelegramPaymentsProvider(callback.bot, settings)
+        await provider.create_invoice(invoice_request)
         await callback.answer("Счет сформирован.")
     except AppError as exc:
         await callback.answer(str(exc), show_alert=True)

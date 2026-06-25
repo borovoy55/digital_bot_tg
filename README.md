@@ -1,6 +1,6 @@
 # Production-ready Telegram-бот для продажи цифровых товаров
 
-Бот продает уникальные цифровые строки: ключи, промокоды, токены, аккаунты, доступы. После успешной оплаты через Telegram Payments он атомарно выдает один свободный код выбранного товара.
+Бот продает уникальные цифровые строки: ключи, промокоды, токены, аккаунты, доступы. После успешной оплаты через Telegram Payments или Platega он атомарно выдает свободные коды выбранного товара.
 
 ## Стек
 
@@ -11,7 +11,7 @@
 - Alembic
 - Redis
 - Docker / Docker Compose
-- Telegram Payments
+- Telegram Payments / Platega
 
 ## Ключевая защита продажи
 
@@ -21,6 +21,34 @@
 - Код выбирается через `SELECT ... FOR UPDATE SKIP LOCKED`.
 - На платежи стоят уникальные ограничения по `telegram_payment_charge_id` и `provider_payment_charge_id`.
 - Повторный `successful_payment` не выдает новый код, а возвращает уже выданный.
+
+## Платежи
+
+По умолчанию используется Telegram Payments:
+
+```env
+PAYMENT_PROVIDER=telegram
+TELEGRAM_PAYMENT_PROVIDER_TOKEN=replace_with_provider_token_from_botfather
+```
+
+Для Platega:
+
+```env
+PAYMENT_PROVIDER=platega
+PLATEGA_MERCHANT_ID=4ca85495-99c7-4c04-bb40-aa8e753ab166
+PLATEGA_API_KEY=replace_with_platega_api_key
+PLATEGA_CALLBACK_ENABLED=true
+```
+
+Если `PLATEGA_PAYMENT_METHOD` пустой, бот создает универсальную платежную форму через `v2/transaction/process`. При необходимости можно указать метод из инструкции Platega: `2` СБП QR, `3` ЕРИП, `11` карты, `12` международные карты, `13` криптовалюта.
+
+Callback URL для кабинета Platega:
+
+```text
+https://your-domain.example/payments/platega/callback
+```
+
+Endpoint принимает POST-уведомления Platega, проверяет заголовки `X-MerchantId` и `X-Secret`, завершает заказ только при статусе `CONFIRMED` и игнорирует повторную выдачу кодов.
 
 ## BotFather
 
@@ -39,7 +67,7 @@ cp .env.example .env
 Обязательно замените:
 
 - `BOT_TOKEN`
-- `TELEGRAM_PAYMENT_PROVIDER_TOKEN`
+- `TELEGRAM_PAYMENT_PROVIDER_TOKEN` или параметры `PLATEGA_*`
 - `ADMIN_IDS`
 - `CALLBACK_SECRET`
 - `POSTGRES_PASSWORD`
@@ -59,7 +87,7 @@ alembic upgrade head
 python -m app.main
 ```
 
-Режим по умолчанию: polling. Он не требует открытых входящих портов и лучше подходит для сервера с VPN.
+Режим по умолчанию: polling. Для Platega callback контейнер `bot` слушает `WEBHOOK_PORT` и должен быть доступен снаружи через публичный HTTPS-адрес или reverse proxy.
 
 ## Миграции
 
@@ -89,7 +117,7 @@ on conflict (telegram_id) do update set is_active = true;
 
 - `/start`: регистрация и главное меню.
 - Каталог: категории → подкатегории → товары → карточка товара.
-- Покупка: счет Telegram Payments.
+- Покупка: счет Telegram Payments или ссылка на оплату Platega.
 - Мои покупки: дата, товар, цена, статус, выданный код.
 - Поддержка, FAQ, Правила: тексты из таблицы `settings`.
 

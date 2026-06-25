@@ -229,6 +229,15 @@ def quantity_input_keyboard(product_id: int, *, page: int = 0) -> InlineKeyboard
     return builder.as_markup()
 
 
+def payment_url_keyboard(payment_url: str, *, product_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💳 Перейти к оплате", url=payment_url)
+    builder.button(text="◀️ Назад", callback_data=ProductCb(action="view", product_id=product_id, page=page))
+    builder.button(text="🏠 В главное меню", callback_data=MenuCb(action="home"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def purchases_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Обновить", callback_data=PurchasesCb(page=0))

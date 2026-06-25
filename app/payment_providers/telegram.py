@@ -71,9 +71,10 @@ class TelegramPaymentsProvider(PaymentProvider):
             telegram_payment_charge_id=telegram_payment_charge_id,
             provider_payment_charge_id=provider_payment_charge_id,
             raw_payload=raw_payload,
+            provider_name=self.name,
         )
         return PaymentResult(
             order_id=completed.order.id,
-            digital_item_value=completed.digital_item.value,
+            digital_item_values=[item.value for item in completed.digital_items],
             already_processed=completed.already_processed,
         )

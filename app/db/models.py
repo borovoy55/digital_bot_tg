@@ -161,7 +161,6 @@ class DigitalItem(Base, TimestampMixin):
     order_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("orders.id", use_alter=True, name="fk_digital_items_order_id"),
         nullable=True,
-        unique=True,
     )
     sold_to_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
     uploaded_by_admin_id: Mapped[Optional[int]] = mapped_column(ForeignKey("admins.id"), nullable=True)
@@ -169,7 +168,7 @@ class DigitalItem(Base, TimestampMixin):
 
     product: Mapped["Product"] = relationship(back_populates="digital_items")
     order: Mapped[Optional["Order"]] = relationship(
-        back_populates="issued_item",
+        back_populates="issued_items",
         foreign_keys=[order_id],
     )
 
@@ -189,6 +188,7 @@ class Order(Base, TimestampMixin):
         ForeignKey("subcategories.id"), nullable=False, index=True
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), default=OrderStatus.PENDING.value, nullable=False, index=True
@@ -203,12 +203,15 @@ class Order(Base, TimestampMixin):
 
     user: Mapped["User"] = relationship(back_populates="orders")
     product: Mapped["Product"] = relationship(back_populates="orders")
-    issued_item: Mapped[Optional["DigitalItem"]] = relationship(
+    issued_items: Mapped[List["DigitalItem"]] = relationship(
         back_populates="order",
         foreign_keys="DigitalItem.order_id",
-        uselist=False,
     )
     payments: Mapped[List["Payment"]] = relationship(back_populates="order")
+
+    @property
+    def issued_item(self) -> Optional["DigitalItem"]:
+        return self.issued_items[0] if self.issued_items else None
 
 
 class Payment(Base, TimestampMixin):

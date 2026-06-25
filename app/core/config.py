@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     bot_token: str = Field(alias="BOT_TOKEN")
     bot_username: str | None = Field(default=None, alias="BOT_USERNAME")
     telegram_payment_provider_token: str = Field(default="", alias="TELEGRAM_PAYMENT_PROVIDER_TOKEN")
+    payment_provider: str = Field(default="telegram", alias="PAYMENT_PROVIDER")
     admin_ids_raw: str = Field(default="", alias="ADMIN_IDS")
 
     database_url: str = Field(alias="DATABASE_URL")
@@ -20,6 +21,14 @@ class Settings(BaseSettings):
     callback_secret: str = Field(alias="CALLBACK_SECRET", min_length=24)
     payment_currency_default: str = Field(default="RUB", alias="PAYMENT_CURRENCY_DEFAULT")
     invoice_ttl_seconds: int = Field(default=900, alias="INVOICE_TTL_SECONDS", ge=60, le=86_400)
+
+    platega_base_url: str = Field(default="https://app.platega.io", alias="PLATEGA_BASE_URL")
+    platega_merchant_id: str = Field(default="", alias="PLATEGA_MERCHANT_ID")
+    platega_api_key: str = Field(default="", alias="PLATEGA_API_KEY")
+    platega_payment_method: int | None = Field(default=None, alias="PLATEGA_PAYMENT_METHOD")
+    platega_return_url: str = Field(default="", alias="PLATEGA_RETURN_URL")
+    platega_failed_url: str = Field(default="", alias="PLATEGA_FAILED_URL")
+    platega_callback_enabled: bool = Field(default=False, alias="PLATEGA_CALLBACK_ENABLED")
 
     webhook_mode: bool = Field(default=False, alias="WEBHOOK_MODE")
     webhook_url: str | None = Field(default=None, alias="WEBHOOK_URL")
@@ -40,6 +49,21 @@ class Settings(BaseSettings):
         value = value.strip().upper()
         if len(value) != 3 or not value.isalpha():
             raise ValueError("currency must be an ISO-4217 code")
+        return value
+
+    @field_validator("payment_provider")
+    @classmethod
+    def normalize_payment_provider(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"telegram", "platega"}:
+            raise ValueError("payment provider must be telegram or platega")
+        return value
+
+    @field_validator("platega_payment_method", mode="before")
+    @classmethod
+    def empty_platega_payment_method(cls, value: object) -> object:
+        if value == "":
+            return None
         return value
 
     @property
