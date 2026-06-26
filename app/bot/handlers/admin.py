@@ -36,19 +36,23 @@ from app.bot.keyboards import (
     admin_subcategories_keyboard,
     admin_subcategory_keyboard,
     admin_subcategory_select_keyboard,
+    admin_user_keyboard,
+    admin_users_keyboard,
 )
 from app.bot.utils import answer_or_edit
 from app.core.config import Settings
 from app.core.exceptions import AccessDenied, AppError, ValidationError
 from app.core.security import parse_items_csv, parse_items_text
-from app.db.models import Category, DigitalItem, Product, Subcategory, User
+from app.db.models import Category, DigitalItem, Order, Product, Subcategory, User
 from app.services.admin import (
     create_category,
     create_product,
     create_subcategory,
     dashboard_stats,
     get_order_detail,
+    get_user_purchase_stats,
     list_recent_orders,
+    list_users_page,
     set_entity_active,
     soft_delete_entity,
     update_entity_sort_order,
@@ -256,6 +260,61 @@ async def _show_product_card(
     )
 
 
+def _order_status_label(status: str) -> str:
+    labels = {
+        "pending": "⏳ ожидает",
+        "paid": "✅ оплачен",
+        "cancelled": "🚫 отменен",
+        "error": "⚠️ ошибка",
+        "refunded": "↩️ возврат",
+    }
+    return labels.get(status, status)
+
+
+def _user_label(user: User) -> str:
+    name = f"@{user.username}" if user.username else "без username"
+    full_name = " ".join(part for part in [user.first_name, user.last_name] if part)
+    if full_name:
+        name += f" · {full_name}"
+    return name
+
+
+def _format_user_purchase_stats(stats: object) -> str:
+    user = stats.user
+    lines = [
+        f"👤 Пользователь #{user.id}",
+        f"telegram_id: {user.telegram_id}",
+        f"Имя: {_user_label(user)}",
+        f"Статус: {'🚫 заблокирован' if user.is_blocked else '✅ активен'}",
+        f"Регистрация: {user.registered_at}",
+        f"Последняя активность: {user.last_activity_at}",
+        "",
+        "📊 Покупки",
+        f"🧾 Всего заказов: {stats.orders_total}",
+        f"✅ Оплачено: {stats.orders_success}",
+        f"⏳ Ожидает оплаты: {stats.orders_pending}",
+        f"🚫 Отменено: {stats.orders_cancelled}",
+        f"⚠️ Ошибок: {stats.orders_error}",
+        f"↩️ Возвратов: {stats.orders_refunded}",
+        f"🔑 Куплено кодов: {stats.purchased_items}",
+        f"💰 Сумма покупок: {stats.total_spent}",
+        f"📈 Средний чек: {stats.average_check:.2f}",
+        "",
+        "🧾 Последние заказы:",
+    ]
+    if not stats.last_orders:
+        lines.append("Заказов пока нет.")
+        return "\n".join(lines)
+    for order in stats.last_orders:
+        assert isinstance(order, Order)
+        product_title = order.product.title if order.product else f"product_id={order.product_id}"
+        lines.append(
+            f"#{order.id} · {_order_status_label(order.status)} · {order.amount} {order.currency} · "
+            f"{order.quantity} шт. · {product_title}"
+        )
+    return "\n".join(lines)
+
+
 async def _digital_product_text(session: AsyncSession, product: Product) -> str:
     rows = await session.execute(
         select(DigitalItem.status, func.count(DigitalItem.id))
@@ -455,13 +514,12 @@ async def admin_lists(
         )
         await answer_or_edit(callback, text or "🧾 Заказов нет.", reply_markup=admin_orders_keyboard(o.id for o in orders))
     elif entity == "users":
-        users = list(
-            await session.scalars(select(User).order_by(User.last_activity_at.desc()).limit(15))
+        page = await list_users_page(session, page=callback_data.page)
+        await answer_or_edit(
+            callback,
+            "👥 Пользователи\n\nВыберите пользователя, чтобы посмотреть статистику покупок.",
+            reply_markup=admin_users_keyboard(page),
         )
-        text = "👥 Пользователи\n\n" + "\n".join(
-            f"{u.id}: {u.telegram_id} @{u.username or '-'} blocked={u.is_blocked}" for u in users
-        )
-        await answer_or_edit(callback, text, reply_markup=admin_back())
     elif entity == "cats":
         page = await _categories_page(session, page=callback_data.page)
         await answer_or_edit(
@@ -2084,6 +2142,27 @@ async def admin_subcategory_delete(
         await callback.answer(str(exc), show_alert=True)
         return
     await callback.answer("🗑 Подкатегория отключена.")
+
+
+@router.callback_query(AdminCb.filter(F.action == "uview"))
+async def admin_user_view(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        stats = await get_user_purchase_stats(session, callback_data.object_id)
+        await answer_or_edit(
+            callback,
+            _format_user_purchase_stats(stats),
+            reply_markup=admin_user_keyboard(callback_data.object_id, page=callback_data.page),
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
 
 
 @router.callback_query(AdminCb.filter((F.action == "view") & (F.entity == "order")))

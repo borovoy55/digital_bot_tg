@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.callbacks import AdminCb, CatalogCb, MenuCb, ProductCb, PurchasesCb
-from app.db.models import Category, Product, Subcategory
+from app.db.models import Category, Product, Subcategory, User
 from app.services.catalog import Page, PublicProduct
 from app.services.menu import MenuButton
 
@@ -403,6 +403,37 @@ def admin_order_keyboard(order_id: int, has_item: bool) -> InlineKeyboardMarkup:
             callback_data=AdminCb(action="resend", entity="order", object_id=order_id),
         )
     builder.button(text="🧾 Заказы", callback_data=AdminCb(action="list", entity="orders"))
+    builder.button(text="🛠 Админ-меню", callback_data=AdminCb(action="home"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_users_keyboard(page: Page) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for user in page.items:
+        assert isinstance(user, User)
+        blocked = "🚫" if user.is_blocked else "👤"
+        label = f"{blocked} #{user.id} · {user.telegram_id}"
+        if user.username:
+            label += f" · @{user.username}"
+        builder.button(
+            text=label,
+            callback_data=AdminCb(action="uview", entity="user", object_id=user.id, page=page.page),
+        )
+    _pager(
+        builder,
+        cb_prev=AdminCb(action="list", entity="users", page=page.page - 1),
+        cb_next=AdminCb(action="list", entity="users", page=page.page + 1),
+        page=page,
+    )
+    builder.button(text="🛠 Админ-меню", callback_data=AdminCb(action="home"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_user_keyboard(user_id: int, *, page: int = 0) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="👥 К пользователям", callback_data=AdminCb(action="list", entity="users", page=page))
     builder.button(text="🛠 Админ-меню", callback_data=AdminCb(action="home"))
     builder.adjust(1)
     return builder.as_markup()

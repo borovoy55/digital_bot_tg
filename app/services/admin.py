@@ -22,6 +22,7 @@ from app.db.models import (
     User,
 )
 from app.services.audit import write_audit_log
+from app.services.catalog import Page, paginate
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,21 @@ class DashboardStats:
     top_buyers: list[tuple[int, str | None, Decimal]]
     available_items: int
     sold_items: int
+
+
+@dataclass(frozen=True)
+class UserPurchaseStats:
+    user: User
+    orders_total: int
+    orders_success: int
+    orders_pending: int
+    orders_cancelled: int
+    orders_error: int
+    orders_refunded: int
+    total_spent: Decimal
+    average_check: Decimal
+    purchased_items: int
+    last_orders: list[Order]
 
 
 async def dashboard_stats(session: AsyncSession) -> DashboardStats:
@@ -136,7 +152,7 @@ async def list_recent_orders(session: AsyncSession, *, limit: int = 10) -> list[
         .options(
             selectinload(Order.user),
             selectinload(Order.product),
-            selectinload(Order.issued_item),
+            selectinload(Order.issued_items),
             selectinload(Order.payments),
         )
         .order_by(Order.created_at.desc())
@@ -152,13 +168,70 @@ async def get_order_detail(session: AsyncSession, order_id: int) -> Order:
         .options(
             selectinload(Order.user),
             selectinload(Order.product),
-            selectinload(Order.issued_item),
+            selectinload(Order.issued_items),
             selectinload(Order.payments),
         )
     )
     if order is None:
         raise NotFoundError("order not found")
     return order
+
+
+async def list_users_page(session: AsyncSession, *, page: int = 0) -> Page:
+    stmt = select(User).order_by(User.last_activity_at.desc(), User.id.desc())
+    return await paginate(session, stmt, page=page)
+
+
+async def get_user_purchase_stats(session: AsyncSession, user_id: int, *, limit: int = 8) -> UserPurchaseStats:
+    user = await session.get(User, user_id)
+    if user is None:
+        raise NotFoundError("user not found")
+
+    async def count_status(status: str | None = None) -> int:
+        stmt = select(func.count(Order.id)).where(Order.user_id == user.id)
+        if status is not None:
+            stmt = stmt.where(Order.status == status)
+        return int(await session.scalar(stmt) or 0)
+
+    total_spent = Decimal(
+        await session.scalar(
+            select(func.coalesce(func.sum(Order.amount), 0)).where(
+                Order.user_id == user.id,
+                Order.status == OrderStatus.PAID.value,
+            )
+        )
+        or 0
+    )
+    orders_success = await count_status(OrderStatus.PAID.value)
+    purchased_items = int(
+        await session.scalar(
+            select(func.coalesce(func.sum(Order.quantity), 0)).where(
+                Order.user_id == user.id,
+                Order.status == OrderStatus.PAID.value,
+            )
+        )
+        or 0
+    )
+    rows = await session.scalars(
+        select(Order)
+        .where(Order.user_id == user.id)
+        .options(selectinload(Order.product), selectinload(Order.issued_items), selectinload(Order.payments))
+        .order_by(Order.created_at.desc())
+        .limit(limit)
+    )
+    return UserPurchaseStats(
+        user=user,
+        orders_total=await count_status(),
+        orders_success=orders_success,
+        orders_pending=await count_status(OrderStatus.PENDING.value),
+        orders_cancelled=await count_status(OrderStatus.CANCELLED.value),
+        orders_error=await count_status(OrderStatus.ERROR.value),
+        orders_refunded=await count_status(OrderStatus.REFUNDED.value),
+        total_spent=total_spent,
+        average_check=total_spent / orders_success if orders_success else Decimal("0"),
+        purchased_items=purchased_items,
+        last_orders=list(rows),
+    )
 
 
 def _normalize_currency(currency: str) -> str:
