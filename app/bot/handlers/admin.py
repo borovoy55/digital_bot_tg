@@ -18,6 +18,7 @@ from app.bot.keyboards import (
     admin_category_keyboard,
     admin_category_select_keyboard,
     admin_digital_item_keyboard,
+    admin_digital_items_keyboard,
     admin_digital_product_keyboard,
     admin_digital_search_keyboard,
     admin_empty_product_tree_keyboard,
@@ -72,6 +73,7 @@ from app.services.digital_items import (
     delete_digital_item,
     export_digital_items_csv,
     import_digital_items,
+    list_digital_items_page,
     search_digital_items,
     update_digital_item_value,
 )
@@ -275,6 +277,42 @@ async def _digital_product_text(session: AsyncSession, product: Product) -> str:
     )
 
 
+def _digital_item_status_label(status: str) -> str:
+    labels = {
+        "available": "✅ доступен",
+        "reserved": "⏳ зарезервирован",
+        "sold": "🏷 продан",
+        "deleted": "🗑 удален",
+    }
+    return labels.get(status, status)
+
+
+def _short_code_value(value: str, *, limit: int = 52) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit - 1]}…"
+
+
+def _digital_items_page_text(product: Product, page: object) -> str:
+    lines = [
+        f"🔑 Коды · {product.title}",
+        f"📦 product_id: {product.id}",
+        f"Страница {page.page + 1}/{page.pages} · всего: {page.total}",
+        "",
+    ]
+    if not page.items:
+        lines.append("Коды пока не загружены.")
+        return "\n".join(lines)
+    for item in page.items:
+        status = _digital_item_status_label(item.status)
+        lines.append(f"#{item.id} · {status}")
+        lines.append(_short_code_value(item.value))
+        lines.append("")
+    lines.append("Откройте код кнопкой ниже, чтобы посмотреть полностью, изменить или удалить.")
+    return "\n".join(lines)
+
+
 async def _show_digital_product(
     target: Message | CallbackQuery,
     session: AsyncSession,
@@ -287,6 +325,22 @@ async def _show_digital_product(
         target,
         await _digital_product_text(session, product),
         reply_markup=admin_digital_product_keyboard(product.id, page=page),
+    )
+
+
+async def _show_digital_items_page(
+    target: Message | CallbackQuery,
+    session: AsyncSession,
+    *,
+    product_id: int,
+    page: int = 0,
+) -> None:
+    product = await get_product_with_tree(session, product_id)
+    items_page = await list_digital_items_page(session, product_id=product_id, page=page)
+    await answer_or_edit(
+        target,
+        _digital_items_page_text(product, items_page),
+        reply_markup=admin_digital_items_keyboard(items_page, product_id=product_id),
     )
 
 
@@ -1324,6 +1378,27 @@ async def admin_digital_items_product(
     await callback.answer()
 
 
+@router.callback_query(AdminCb.filter(F.action == "ilist"))
+async def admin_digital_items_list(
+    callback: CallbackQuery,
+    callback_data: AdminCb,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        await _admin(session, settings, callback)
+        await _show_digital_items_page(
+            callback,
+            session,
+            product_id=callback_data.object_id,
+            page=callback_data.page,
+        )
+    except AppError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
 @router.callback_query(AdminCb.filter(F.action == "iupload"))
 async def admin_digital_upload_start(
     callback: CallbackQuery,
@@ -1494,6 +1569,7 @@ async def admin_digital_item_view(
                 item.id,
                 product_id=item.product_id,
                 page=callback_data.page,
+                can_modify=item.status == "available",
             ),
         )
     except AppError as exc:
@@ -1543,7 +1619,7 @@ async def admin_digital_item_edit_value(
         )
         await state.clear()
         await message.answer("✅ Код обновлен.")
-        await _show_digital_product(message, session, product_id=item.product_id, page=int(data.get("page") or 0))
+        await _show_digital_items_page(message, session, product_id=item.product_id, page=int(data.get("page") or 0))
     except (KeyError, ValueError, AppError) as exc:
         await message.answer(str(exc))
 
@@ -1563,7 +1639,7 @@ async def admin_digital_item_delete(
             actor_telegram_id=callback.from_user.id,
             admin_id=admin.id if admin else None,
         )
-        await _show_digital_product(callback, session, product_id=item.product_id, page=callback_data.page)
+        await _show_digital_items_page(callback, session, product_id=item.product_id, page=callback_data.page)
     except AppError as exc:
         await callback.answer(str(exc), show_alert=True)
         return

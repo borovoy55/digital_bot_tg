@@ -486,11 +486,32 @@ def admin_product_keyboard(product: Product, *, page: int = 0) -> InlineKeyboard
 
 def admin_digital_product_keyboard(product_id: int, *, page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Смотреть все коды", callback_data=AdminCb(action="ilist", entity="product", object_id=product_id, page=0))
     builder.button(text="➕ Загрузить коды", callback_data=AdminCb(action="iupload", entity="product", object_id=product_id, page=page))
     builder.button(text="🔎 Найти код", callback_data=AdminCb(action="isearch", entity="product", object_id=product_id, page=page))
     builder.button(text="📤 Экспорт CSV", callback_data=AdminCb(action="iexport", entity="product", object_id=product_id, page=page))
     builder.button(text="📦 К товару", callback_data=AdminCb(action="pview", entity="product", object_id=product_id, page=page))
     builder.button(text="🛠 Админ-меню", callback_data=AdminCb(action="home"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_digital_items_keyboard(page: Page, *, product_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for item in page.items:
+        item_id = getattr(item, "id")
+        status = getattr(item, "status")
+        builder.button(
+            text=f"🔑 #{item_id} · {status}",
+            callback_data=AdminCb(action="iview", entity="item", object_id=item_id, page=page.page),
+        )
+    _pager(
+        builder,
+        cb_prev=AdminCb(action="ilist", entity="product", object_id=product_id, page=page.page - 1),
+        cb_next=AdminCb(action="ilist", entity="product", object_id=product_id, page=page.page + 1),
+        page=page,
+    )
+    builder.button(text="🔑 Коды товара", callback_data=AdminCb(action="items", entity="product", object_id=product_id))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -509,11 +530,19 @@ def admin_digital_search_keyboard(items: Iterable[object], *, product_id: int, p
     return builder.as_markup()
 
 
-def admin_digital_item_keyboard(item_id: int, *, product_id: int, page: int = 0) -> InlineKeyboardMarkup:
+def admin_digital_item_keyboard(
+    item_id: int,
+    *,
+    product_id: int,
+    page: int = 0,
+    can_modify: bool = True,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="✏️ Изменить код", callback_data=AdminCb(action="iedit", entity="item", object_id=item_id, page=page))
-    builder.button(text="🗑 Удалить", callback_data=AdminCb(action="idel", entity="item", object_id=item_id, page=page))
-    builder.button(text="🔑 Коды товара", callback_data=AdminCb(action="items", entity="product", object_id=product_id, page=page))
+    if can_modify:
+        builder.button(text="✏️ Изменить код", callback_data=AdminCb(action="iedit", entity="item", object_id=item_id, page=page))
+        builder.button(text="🗑 Удалить", callback_data=AdminCb(action="idel", entity="item", object_id=item_id, page=page))
+    builder.button(text="📋 Все коды", callback_data=AdminCb(action="ilist", entity="product", object_id=product_id, page=page))
+    builder.button(text="🔑 Коды товара", callback_data=AdminCb(action="items", entity="product", object_id=product_id))
     builder.adjust(1)
     return builder.as_markup()
 

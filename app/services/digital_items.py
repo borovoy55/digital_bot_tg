@@ -10,6 +10,7 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.core.security import csv_rows, deduplicate_preserve_order, normalize_digital_item
 from app.db.models import DigitalItem, DigitalItemStatus
 from app.services.audit import write_audit_log
+from app.services.catalog import Page, paginate
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,20 @@ async def search_digital_items(
     return list(rows)
 
 
+async def list_digital_items_page(
+    session: AsyncSession,
+    *,
+    product_id: int,
+    page: int = 0,
+) -> Page:
+    stmt = (
+        select(DigitalItem)
+        .where(DigitalItem.product_id == product_id)
+        .order_by(DigitalItem.id.desc())
+    )
+    return await paginate(session, stmt, page=page)
+
+
 async def update_digital_item_value(
     session: AsyncSession,
     *,
@@ -115,6 +130,8 @@ async def update_digital_item_value(
     item = await session.get(DigitalItem, item_id, with_for_update=True)
     if item is None:
         raise NotFoundError("digital item not found")
+    if item.status != DigitalItemStatus.AVAILABLE.value:
+        raise ValidationError("only available digital items can be edited")
     new_value = normalize_digital_item(value)
     duplicate = await session.scalar(
         select(DigitalItem).where(
@@ -151,6 +168,8 @@ async def delete_digital_item(
     item = await session.get(DigitalItem, item_id, with_for_update=True)
     if item is None:
         raise NotFoundError("digital item not found")
+    if item.status != DigitalItemStatus.AVAILABLE.value:
+        raise ValidationError("only available digital items can be deleted")
     old = {"status": item.status}
     item.status = DigitalItemStatus.DELETED.value
     await write_audit_log(
