@@ -1,0 +1,7 @@
+pay.digitalboot.ru {
+	handle /payments/platega/callback {
+		reverse_proxy bot:8080
+	}
+
+	respond 404
+}

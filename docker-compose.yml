@@ -51,6 +51,21 @@ services:
       timeout: 5s
       retries: 3
 
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - bot
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - bot_net
+
   tests:
     profiles: ["test"]
     build: .
@@ -77,3 +92,7 @@ volumes:
     name: digital_goods_bot_postgres_data
   redis_data:
     name: digital_goods_bot_redis_data
+  caddy_data:
+    name: digital_goods_bot_caddy_data
+  caddy_config:
+    name: digital_goods_bot_caddy_config
