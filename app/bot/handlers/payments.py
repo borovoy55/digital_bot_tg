@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.bot.keyboards import main_menu
 from app.core.config import Settings
 from app.core.exceptions import AppError, NoAvailableItems
 from app.bot.messages import format_paid_order_message
@@ -81,3 +82,5 @@ async def successful_payment(
         format_paid_order_message(order, repeated=result.already_processed),
         parse_mode="HTML",
     )
+    if not result.already_processed:
+        await message.answer("Главное меню", reply_markup=main_menu())

@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from app.bot.keyboards import main_menu
 from app.core.config import Settings
 from app.core.exceptions import AppError, SecurityError
 from app.bot.messages import format_paid_order_message
@@ -36,6 +37,7 @@ async def _send_paid_order(bot: Bot, session_factory: async_sessionmaker, result
             format_paid_order_message(order),
             parse_mode="HTML",
         )
+        await bot.send_message(order.user.telegram_id, "Главное меню", reply_markup=main_menu())
 
 
 def create_platega_callback_handler(
