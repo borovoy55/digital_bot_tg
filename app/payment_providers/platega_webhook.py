@@ -61,8 +61,8 @@ def create_platega_callback_handler(
         except AppError as exc:
             log.warning("platega_callback_failed", error=str(exc))
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        except Exception:
-            log.exception("platega_callback_unexpected_error")
+        except Exception as exc:
+            log.exception("platega_callback_unexpected_error", error=str(exc))
             return web.json_response({"ok": False, "error": "internal error"}, status=500)
         return web.json_response({"ok": True})
 

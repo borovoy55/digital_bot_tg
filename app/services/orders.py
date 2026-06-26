@@ -177,8 +177,8 @@ async def complete_successful_payment(
     session: AsyncSession,
     settings: Settings,
     payload: str,
-    total_amount: int,
-    currency: str,
+    total_amount: int | None,
+    currency: str | None,
     telegram_payment_charge_id: str | None,
     provider_payment_charge_id: str | None,
     raw_payload: dict[str, Any],
@@ -206,13 +206,15 @@ async def complete_successful_payment(
             return CompletedOrder(order=order, digital_items=list(order.issued_items), already_processed=True)
         if order.status != OrderStatus.PENDING.value:
             raise PaymentError("order is not pending")
-        if order.currency != currency:
+        payment_currency = currency or order.currency
+        if order.currency != payment_currency:
             order.status = OrderStatus.ERROR.value
             await session.flush()
             raise_after_commit = PaymentError("currency mismatch")
 
         expected_amount = decimal_to_minor(order.amount, order.currency)
-        if raise_after_commit is None and expected_amount != total_amount:
+        payment_amount = total_amount if total_amount is not None else expected_amount
+        if raise_after_commit is None and expected_amount != payment_amount:
             order.status = OrderStatus.ERROR.value
             await session.flush()
             raise_after_commit = PaymentError("amount mismatch")
@@ -259,8 +261,8 @@ async def complete_successful_payment(
                         order_id=order.id,
                         provider=provider_name,
                         status=PaymentStatus.SUCCEEDED.value,
-                        amount=minor_to_decimal(total_amount, currency),
-                        currency=currency,
+                        amount=minor_to_decimal(payment_amount, payment_currency),
+                        currency=payment_currency,
                         telegram_payment_charge_id=telegram_payment_charge_id,
                         provider_payment_charge_id=provider_payment_charge_id,
                         raw_payload=raw_payload,
@@ -286,16 +288,12 @@ async def complete_external_successful_payment(
     amount: int | None = None,
     currency: str | None = None,
 ) -> CompletedOrder:
-    parsed = parse_order_payload(payload)
-    order = await _load_order_for_payment(session, parsed.order_id, lock=False)
-    total_amount = amount if amount is not None else decimal_to_minor(order.amount, order.currency)
-    payment_currency = currency or order.currency
     return await complete_successful_payment(
         session=session,
         settings=settings,
         payload=payload,
-        total_amount=total_amount,
-        currency=payment_currency,
+        total_amount=amount,
+        currency=currency,
         telegram_payment_charge_id=None,
         provider_payment_charge_id=provider_payment_charge_id,
         raw_payload=raw_payload,
