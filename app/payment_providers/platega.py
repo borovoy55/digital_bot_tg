@@ -47,6 +47,11 @@ class PlategaPaymentsProvider:
             return f"{base_url}/v2/transaction/process"
         return f"{base_url}/transaction/process"
 
+    @staticmethod
+    def _response_redirect_url(data: dict[str, Any]) -> str:
+        value = data.get("redirect") or data.get("url") or data.get("paymentUrl") or data.get("payment_url")
+        return str(value) if value else ""
+
     async def create_invoice(self, request: InvoiceRequest) -> PlategaInvoice:
         body: dict[str, Any] = {
             "paymentDetails": {
@@ -70,10 +75,10 @@ class PlategaPaymentsProvider:
                 if response.status >= 400:
                     raise PaymentError(f"Platega payment creation failed: {response.status}")
 
-        transaction_id = str(data.get("transactionId") or "")
-        redirect_url = str(data.get("redirect") or "")
+        transaction_id = str(data.get("transactionId") or data.get("id") or "")
+        redirect_url = self._response_redirect_url(data)
         if not transaction_id or not redirect_url:
-            raise PaymentError("Platega response has no transaction redirect")
+            raise PaymentError("Platega did not return a payment link")
         return PlategaInvoice(
             order_id=request.order_id,
             transaction_id=transaction_id,
