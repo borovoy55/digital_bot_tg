@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
 from app.core.exceptions import AppError, SecurityError
+from app.bot.messages import format_paid_order_message
 from app.db.models import Order
 from app.payment_providers.platega import PlategaPaymentsProvider
 
@@ -22,15 +23,18 @@ async def _send_paid_order(bot: Bot, session_factory: async_sessionmaker, result
         order = await session.scalar(
             select(Order)
             .where(Order.id == result_order_id)
-            .options(selectinload(Order.user), selectinload(Order.issued_items))
+            .options(
+                selectinload(Order.user),
+                selectinload(Order.product),
+                selectinload(Order.issued_items),
+            )
         )
         if order is None or order.user is None or not order.issued_items:
             raise AppError("paid order cannot be loaded for delivery")
-        values = "\n".join(f"`{item.value}`" for item in order.issued_items)
         await bot.send_message(
             order.user.telegram_id,
-            f"✅ Покупка оплачена.\n\n🔑 Ваши цифровые товары:\n{values}",
-            parse_mode="Markdown",
+            format_paid_order_message(order),
+            parse_mode="HTML",
         )
 
 

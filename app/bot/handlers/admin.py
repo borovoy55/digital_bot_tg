@@ -39,6 +39,7 @@ from app.bot.keyboards import (
     admin_user_keyboard,
     admin_users_keyboard,
 )
+from app.bot.messages import format_paid_order_message
 from app.bot.utils import answer_or_edit
 from app.core.config import Settings
 from app.core.exceptions import AccessDenied, AppError, ValidationError
@@ -2221,11 +2222,10 @@ async def admin_resend_code(
         order = await get_order_detail(session, callback_data.object_id)
         if not order.issued_items:
             raise ValidationError("У заказа нет выданного кода.")
-        values = "\n".join(f"`{item.value}`" for item in order.issued_items)
         await callback.bot.send_message(
             order.user.telegram_id,
-            f"Повторная отправка цифровых товаров по заказу #{order.id}:\n{values}",
-            parse_mode="Markdown",
+            format_paid_order_message(order, repeated=True),
+            parse_mode="HTML",
         )
     except AppError as exc:
         await callback.answer(str(exc), show_alert=True)

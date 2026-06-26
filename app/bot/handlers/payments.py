@@ -3,10 +3,14 @@ from __future__ import annotations
 import structlog
 from aiogram import Router
 from aiogram.types import Message, PreCheckoutQuery
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
 from app.core.exceptions import AppError, NoAvailableItems
+from app.bot.messages import format_paid_order_message
+from app.db.models import Order
 from app.payment_providers.telegram import TelegramPaymentsProvider
 
 router = Router()
@@ -64,6 +68,16 @@ async def successful_payment(
         await message.answer("⚠️ Платеж не удалось обработать автоматически. Обратитесь в поддержку.")
         return
 
-    prefix = "🔁 Коды уже были выданы ранее" if result.already_processed else "✅ Покупка оплачена"
-    values = "\n".join(f"`{value}`" for value in result.digital_item_values)
-    await message.answer(f"{prefix}.\n\n🔑 Ваши цифровые товары:\n{values}", parse_mode="Markdown")
+    order = await session.scalar(
+        select(Order)
+        .where(Order.id == result.order_id)
+        .options(selectinload(Order.product), selectinload(Order.issued_items))
+    )
+    if order is None:
+        values = "\n".join(result.digital_item_values)
+        await message.answer(f"✅ Спасибо за покупку!\n\n🔑 Ваши коды:\n{values}")
+        return
+    await message.answer(
+        format_paid_order_message(order, repeated=result.already_processed),
+        parse_mode="HTML",
+    )
